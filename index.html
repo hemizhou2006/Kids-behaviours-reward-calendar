@@ -1,0 +1,2787 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>儿童行为管理记录奖励日历 - Kids Behaviour Reward Calendar</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+    import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'kids-calendar-app';
+    let firebaseConfig = null;
+    try {
+      if (typeof __firebase_config !== 'undefined') {
+        firebaseConfig = JSON.parse(__firebase_config);
+      }
+    } catch (e) {
+      console.warn("Failed to parse __firebase_config", e);
+    }
+
+    // Cloud Bridge for Cross-Device Real-time Synchronization
+    window.CloudBridge = {
+      isReady: false,
+      userId: null,
+      appId,
+      db: null,
+      auth: null,
+      listeners: new Set(),
+      init: async function() {
+        if (!firebaseConfig) {
+          this.notify();
+          return false;
+        }
+        try {
+          const app = initializeApp(firebaseConfig);
+          const auth = getAuth(app);
+          const db = getFirestore(app);
+
+          let user = null;
+          if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+            const cred = await signInWithCustomToken(auth, __initial_auth_token);
+            user = cred.user;
+          } else {
+            const cred = await signInAnonymously(auth);
+            user = cred.user;
+          }
+
+          if (!user) return false;
+          this.userId = user.uid;
+          this.db = db;
+          this.auth = auth;
+          this.isReady = true;
+          this.notify();
+          return true;
+        } catch (err) {
+          console.error("Cloud Bridge initialization error:", err);
+          this.notify();
+          return false;
+        }
+      },
+      subscribeCalendar: function(familyId, onData, onError) {
+        if (!this.isReady || !this.db || !this.auth?.currentUser) {
+          if (onError) onError(new Error("Cloud service not authenticated"));
+          return () => {};
+        }
+        const docRef = doc(this.db, 'artifacts', appId, 'public', 'data', 'family_calendars', familyId);
+        return onSnapshot(docRef, (snapshot) => {
+          if (snapshot.exists()) {
+            onData(snapshot.data());
+          } else {
+            onData(null);
+          }
+        }, (err) => {
+          console.error("Firestore listen error:", err);
+          if (onError) onError(err);
+        });
+      },
+      saveCalendar: async function(familyId, data) {
+        if (!this.isReady || !this.db || !this.auth?.currentUser) return false;
+        try {
+          const docRef = doc(this.db, 'artifacts', appId, 'public', 'data', 'family_calendars', familyId);
+          await setDoc(docRef, {
+            ...data,
+            updatedAt: new Date().toISOString(),
+            updatedBy: this.userId
+          }, { merge: true });
+          return true;
+        } catch (err) {
+          console.error("Cloud save failed:", err);
+          return false;
+        }
+      },
+      notify: function() {
+        this.listeners.forEach(cb => cb(this));
+      },
+      onReady: function(cb) {
+        if (this.isReady || firebaseConfig === null) cb(this);
+        this.listeners.add(cb);
+        return () => this.listeners.delete(cb);
+      }
+    };
+
+    window.CloudBridge.init();
+  </script>
+
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Fredoka:wght@400;600;700&family=Nunito:wght@400;600;700;800;900&display=swap');
+    body {
+      font-family: 'Nunito', 'Fredoka', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    @keyframes popIn {
+      0% { transform: scale(0.6); opacity: 0; }
+      70% { transform: scale(1.08); opacity: 1; }
+      100% { transform: scale(1); opacity: 1; }
+    }
+    @keyframes bounceGlow {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-8px); }
+    }
+    .animate-pop { animation: popIn 0.35s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards; }
+    .animate-float { animation: bounceGlow 2.5s ease-in-out infinite; }
+    /* Hide scrollbars for clean UI */
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+  </style>
+</head>
+<body class="bg-gradient-to-br from-amber-50 via-sky-50/40 to-emerald-50 text-slate-700 min-h-screen">
+  <div id="root"></div>
+
+  <script>
+    // Web Audio Synthesizer for cheerful reward feedback (Zero external audio file dependencies)
+    const playCheerSound = () => {
+      try {
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContext) return;
+        const ctx = new AudioContext();
+        const notes = [523.25, 659.25, 783.99, 1046.50]; // C5, E5, G5, C6 arpeggio
+        notes.forEach((freq, index) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = 'triangle';
+          osc.frequency.setValueAtTime(freq, ctx.currentTime + index * 0.08);
+          gain.gain.setValueAtTime(0.2, ctx.currentTime + index * 0.08);
+          gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + index * 0.08 + 0.35);
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start(ctx.currentTime + index * 0.08);
+          osc.stop(ctx.currentTime + index * 0.08 + 0.4);
+        });
+      } catch (e) {
+        console.warn('Audio playback error', e);
+      }
+    };
+  </script>
+
+  <script type="text/babel">
+    const { useState, useEffect, useMemo, useRef } = React;
+
+    // SVG Icon Collection
+    const Icons = {
+      Check: ({ size = 20, className = "" }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" className={className}><polyline points="20 6 9 17 4 12"/></svg>
+      ),
+      ChevronLeft: ({ size = 20, className = "" }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={className}><polyline points="15 18 9 12 15 6"/></svg>
+      ),
+      ChevronRight: ({ size = 20, className = "" }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={className}><polyline points="9 18 15 12 9 6"/></svg>
+      ),
+      Calendar: ({ size = 20, className = "" }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+      ),
+      Flame: ({ size = 20, className = "" }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 3z"/></svg>
+      ),
+      Medal: ({ size = 20, className = "" }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><circle cx="12" cy="8" r="7"/><polyline points="8.21 13.89 7 23 12 20 17 23 15.79 13.88"/></svg>
+      ),
+      Trophy: ({ size = 20, className = "" }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/></svg>
+      ),
+      BarChart: ({ size = 20, className = "" }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+      ),
+      Plus: ({ size = 20, className = "" }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      ),
+      Trash: ({ size = 18, className = "" }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+      ),
+      Edit: ({ size = 18, className = "" }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+      ),
+      Lock: ({ size = 18, className = "" }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+      ),
+      Unlock: ({ size = 18, className = "" }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
+      ),
+      Gift: ({ size = 20, className = "" }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><polyline points="20 12 20 22 4 22 4 12"/><rect x="2" y="7" width="20" height="5"/><line x1="12" y1="22" x2="12" y2="7"/><path d="M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7z"/><path d="M12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z"/></svg>
+      ),
+      Bell: ({ size = 20, className = "" }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+      ),
+      Download: ({ size = 16, className = "" }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      ),
+      Upload: ({ size = 16, className = "" }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+      ),
+      Users: ({ size = 18, className = "" }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      ),
+      Close: ({ size = 18, className = "" }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      ),
+      Shield: ({ size = 20, className = "" }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>
+      ),
+      Cloud: ({ size = 20, className = "" }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>
+      ),
+      Share: ({ size = 18, className = "" }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+      ),
+      Smartphone: ({ size = 18, className = "" }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><rect x="5" y="2" width="14" height="20" rx="2" ry="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>
+      ),
+      Copy: ({ size = 16, className = "" }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+      ),
+      Sparkles: ({ size = 20, className = "" }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/><path d="M5 3v4"/><path d="M19 17v4"/><path d="M3 5h4"/><path d="M17 19h4"/></svg>
+      ),
+      BookOpen: ({ size = 20, className = "" }) => (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+      )
+    };
+
+    const UI = {
+      zh: {
+        title: "儿童行为管理记录奖励日历",
+        tag: "✨ 快乐成长 · 每天进步一点点",
+        parent: "家长模式",
+        child: "儿童模式",
+        today: "回到今天",
+        month: "月视图",
+        week: "周视图",
+        day: "日视图",
+        backup: "备份导出",
+        restore: "导入恢复",
+        streak: "连续完美完成",
+        badges: "解锁成长勋章",
+        rate: "打卡完成率",
+        points: "本月累计星币",
+        achievement: "成就荣誉勋章",
+        stats: "打卡成长统计",
+        reward: "阶梯兑奖专区",
+        reminder: "每日打卡提醒",
+        mainGoal: "本月大愿望",
+        pin: "家长安全密码",
+        message: "爱心寄语",
+        tasks: "任务库管理",
+        add: "添加",
+        edit: "编辑任务",
+        save: "保存更改",
+        choose: "切换小朋友",
+        newChild: "宝贝姓名",
+        newTask: "例如：阅读20分钟 / 整理玩具",
+        everyday: "每天",
+        weekdays: "周一至周五",
+        weekends: "周六日",
+        selected: "指定星期",
+        learning: "学习",
+        chores: "家务劳动",
+        health: "运动健康",
+        creativity: "艺术创意",
+        social: "礼貌好习惯",
+        complete: "已打卡",
+        planned: "计划中",
+        weekly: "本周",
+        monthly: "本月",
+        great: "太棒啦！",
+        done: "打卡成功！",
+        noTasks: "🌈 今天没有安排任务，好好放松玩耍吧！",
+        encouragement: "💌 爸爸妈妈给你的鼓励",
+        locked: "🔒 儿童模式已开启：编辑与修改已锁定",
+        unlockTitle: "验证家长身份",
+        enterPin: "请输入家长安全 PIN 码",
+        wrongPin: "密码不正确，请重新输入",
+        cancel: "取消",
+        unlock: "验证进入",
+        rewardName: "新增奖品名称",
+        needs: "所需",
+        achieved: "🎉 已达标可兑换",
+        remEnabled: "🔔 提醒已开启",
+        remDisabled: "🔕 提醒未开启",
+        remNote: "系统将在指定时间检查未完成的任务。支持浏览器原生通知和应用内醒目提示。",
+        rewardContent: "目标大奖内容",
+        target: "目标星币",
+        pinNote: "退出儿童模式需输入密码。默认密码：1234，可随时修改。",
+        history: "修改任务将保留已有的历史打卡统计",
+        exported: "✅ 数据已成功备份下载到电脑！",
+        restored: "✅ 备份数据恢复成功！",
+        badBackup: "⚠️ 备份文件无法识别，请检查文件格式",
+        pointsUnit: "星币",
+        cloudSync: "云端多端同步",
+        cloudLive: "🟢 云端已连接 · 多端实时同步",
+        cloudLocal: "🟡 本地单机运行",
+        cloudSyncing: "🔄 正在同步云端...",
+        familyIdLabel: "家庭同步口令 (Family ID)",
+        familyIdDesc: "在手机或平板输入相同的家庭口令，或直接打开专属链接，即可多端实时同步打卡！",
+        copyLink: "复制手机平板访问链接",
+        copied: "✅ 链接已复制到剪贴板！发送到微信/QQ或在手机浏览器中打开即可",
+        cloudUserId: "当前设备识别码",
+        cloudHelpTitle: "如何部署到移动设备/云端？",
+        switchFamily: "切换/加入口令",
+        deployTips: "点击查看手机/iPad一键部署使用教程",
+        manageChildren: "宝贝档案与切换",
+        addChildProfile: "添加新宝贝档案",
+        chooseAvatar: "挑选专属头像",
+        confirmAdd: "确认添加宝贝",
+        aiAssistant: "Gemini AI 育儿智囊",
+        aiTabHabits: "智能好习惯定制",
+        aiTabStory: "睡前故事与表扬信",
+        aiTabRewards: "亲子奖励灵感",
+        aiStoryBtn: "✨ 生成今日专属表扬故事",
+        aiGenTasksBtn: "AI 智能生成好习惯",
+        aiGenRewardsBtn: "AI 推荐创意奖励",
+        aiApplying: "正在调用 Gemini 生成中...",
+        aiAgeGroup: "宝贝年龄段",
+        aiFocus: "期望培养方向",
+        aiAddSelected: "一键加入宝贝日历",
+        aiClose: "完成关闭"
+      },
+      en: {
+        title: "Kids Behaviour Reward Calendar",
+        tag: "✨ Happy Growth · A little progress every day",
+        parent: "Parent Mode",
+        child: "Child Mode",
+        today: "Today",
+        month: "Month View",
+        week: "Week View",
+        day: "Day View",
+        backup: "Export Backup",
+        restore: "Import Backup",
+        streak: "Perfect Days Streak",
+        badges: "Unlocked Badges",
+        rate: "Completion Rate",
+        points: "Total Stars This Month",
+        achievement: "Achievement Badges",
+        stats: "Progress Analytics",
+        reward: "Reward Center",
+        reminder: "Daily Task Reminder",
+        mainGoal: "Monthly Big Dream",
+        pin: "Parent PIN",
+        message: "Encouragement Message",
+        tasks: "Task Management",
+        add: "Add",
+        edit: "Edit Task",
+        save: "Save Changes",
+        choose: "Switch Child",
+        newChild: "Child Name",
+        newTask: "e.g. Read 20 mins / Tidy up toys",
+        everyday: "Every day",
+        weekdays: "Weekdays (Mon-Fri)",
+        weekends: "Weekends (Sat-Sun)",
+        selected: "Custom Days",
+        learning: "Learning",
+        chores: "Chores",
+        health: "Health & Sports",
+        creativity: "Creativity & Art",
+        social: "Good Manners",
+        complete: "Done",
+        planned: "Planned",
+        weekly: "Weekly",
+        monthly: "Monthly",
+        great: "Awesome!",
+        done: "Completed!",
+        noTasks: "🌈 No tasks planned for today. Enjoy your playtime!",
+        encouragement: "💌 Words of Encouragement",
+        locked: "🔒 Child Mode active: Settings and edits are locked",
+        unlockTitle: "Parent Verification",
+        enterPin: "Enter 4-digit Parent PIN",
+        wrongPin: "Incorrect PIN, please try again",
+        cancel: "Cancel",
+        unlock: "Unlock",
+        rewardName: "New Reward Item",
+        needs: "Requires",
+        achieved: "🎉 Ready to Redeem",
+        remEnabled: "🔔 Reminder Active",
+        remDisabled: "🔕 Reminder Inactive",
+        remNote: "At the scheduled time, the calendar checks unfinished tasks.",
+        rewardContent: "Dream Prize",
+        target: "Target Stars",
+        pinNote: "A PIN is required to return to Parent Mode. Default: 1234.",
+        history: "Modifying tasks retains all existing check-in history",
+        exported: "✅ Family data exported successfully!",
+        restored: "✅ Backup restored successfully!",
+        badBackup: "⚠️ Failed to read backup file",
+        pointsUnit: "Stars",
+        cloudSync: "Cloud Sync",
+        cloudLive: "🟢 Cloud Connected · Live Multi-Device",
+        cloudLocal: "🟡 Standalone Local Mode",
+        cloudSyncing: "🔄 Syncing with Cloud...",
+        familyIdLabel: "Family Sync Code (Family ID)",
+        familyIdDesc: "Enter the same Family ID on phone/tablet or use the quick link to sync in real time!",
+        copyLink: "Copy Mobile Share Link",
+        copied: "✅ Link copied to clipboard! Open it in mobile browser to sync.",
+        cloudUserId: "Device Client ID",
+        cloudHelpTitle: "How to deploy to cloud / mobile?",
+        switchFamily: "Join Family Code",
+        deployTips: "View Mobile / Tablet deployment guide",
+        manageChildren: "Manage & Switch Children",
+        addChildProfile: "Add Child Profile",
+        chooseAvatar: "Pick an Avatar",
+        confirmAdd: "Add Child Profile",
+        aiAssistant: "Gemini AI Parenting Copilot",
+        aiTabHabits: "Smart Habit Generator",
+        aiTabStory: "Bedtime Story & Praise",
+        aiTabRewards: "Reward Ideas",
+        aiStoryBtn: "✨ Generate Today's Hero Story",
+        aiGenTasksBtn: "Generate Habits with AI",
+        aiGenRewardsBtn: "Brainstorm Creative Rewards",
+        aiApplying: "Gemini AI is thinking...",
+        aiAgeGroup: "Age Group",
+        aiFocus: "Habit Focus Area",
+        aiAddSelected: "Add to Calendar",
+        aiClose: "Close"
+      }
+    };
+
+    const categories = {
+      learning: { emoji: "📚", color: "bg-rose-100/90 text-rose-800 border-rose-200" },
+      chores: { emoji: "🧹", color: "bg-sky-100/90 text-sky-800 border-sky-200" },
+      health: { emoji: "🏃", color: "bg-emerald-100/90 text-emerald-800 border-emerald-200" },
+      creativity: { emoji: "🎨", color: "bg-amber-100/90 text-amber-800 border-amber-200" },
+      social: { emoji: "🤝", color: "bg-violet-100/90 text-violet-800 border-violet-200" }
+    };
+
+    const starterTasks = [
+      { id: 1, emoji: "📚", name: { zh: "亲子阅读 15 分钟", en: "Read books for 15 mins" }, category: "learning", points: 2, schedule: { type: "daily", days: [] } },
+      { id: 2, emoji: "🧸", name: { zh: "自己收拾整理玩具", en: "Tidy up personal toys" }, category: "chores", points: 2, schedule: { type: "daily", days: [] } },
+      { id: 3, emoji: "🏃", name: { zh: "户外运动或跳绳打卡", en: "Outdoor play or sports" }, category: "health", points: 2, schedule: { type: "daily", days: [] } },
+      { id: 4, emoji: "🎨", name: { zh: "画画 / 手工创造 / 拼图", en: "Drawing / Lego / Crafting" }, category: "creativity", points: 1, schedule: { type: "weekends", days: [] } },
+      { id: 5, emoji: "🤝", name: { zh: "礼貌问候与主动帮父母", en: "Polite manners & help parents" }, category: "social", points: 2, schedule: { type: "daily", days: [] } }
+    ];
+
+    const starterRewards = [
+      { id: 1, points: 20, emoji: "🍦", name: { zh: "自选冰淇淋一个", en: "Choose an Ice Cream treat" } },
+      { id: 2, points: 50, emoji: "🎬", name: { zh: "家庭周末电影与爆米花", en: "Family Movie & Popcorn Night" } },
+      { id: 3, points: 100, emoji: "🎡", name: { zh: "游乐场或动物园一日游", en: "Theme park or Zoo adventure" } }
+    ];
+
+    const pad = n => String(n).padStart(2, "0");
+    const dateKey = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    const clone = d => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    const addDays = (d, n) => {
+      const x = clone(d);
+      x.setDate(x.getDate() + n);
+      return x;
+    };
+    const getMonday = d => addDays(d, -((d.getDay() + 6) % 7));
+    const sameDay = (a, b) => dateKey(a) === dateKey(b);
+    const getLocal = (v, lang) => (typeof v === "object" && v !== null && !Array.isArray(v) ? (v[lang] ?? v.zh ?? v.en ?? "") : String(v ?? ""));
+    const makeBi = v => (typeof v === "object" && v !== null && !Array.isArray(v) ? v : { zh: String(v ?? ""), en: String(v ?? "") });
+
+    function monthCells(y, m) {
+      const firstDayOffset = (new Date(y, m, 1).getDay() + 6) % 7;
+      const totalDays = new Date(y, m + 1, 0).getDate();
+      const cells = Array(firstDayOffset).fill(null);
+      for (let i = 1; i <= totalDays; i++) cells.push(i);
+      while (cells.length % 7 !== 0) cells.push(null);
+      return cells;
+    }
+
+    const normalizeTask = t => ({
+      ...t,
+      name: makeBi(t.name),
+      emoji: t.emoji || categories[t.category]?.emoji || "⭐",
+      points: Number(t.points) || 1,
+      schedule: t.schedule || { type: "daily", days: [] }
+    });
+
+    const makeChild = (name, avatar = "🧒") => ({
+      id: "child_" + Date.now() + "_" + Math.floor(Math.random() * 1000),
+      name,
+      avatar,
+      tasks: starterTasks.map(x => ({ ...x, name: { ...x.name }, schedule: { ...x.schedule } })),
+      records: {},
+      rewardGoal: 100,
+      rewardText: { zh: "迪士尼乐园或特别心愿旅行", en: "Special theme park family trip" },
+      rewards: starterRewards.map(x => ({ ...x, name: { ...x.name } })),
+      parentMessage: { zh: "宝贝，只要每天坚持一步，你就能成为闪闪发光的自己！加油！", en: "Every little effort makes you shine brighter! We believe in you!" },
+      reminder: { enabled: false, time: "19:00" }
+    });
+
+    const normalizeChild = c => ({
+      ...makeChild(c.name || "我的宝贝", c.avatar || "🧒"),
+      ...c,
+      tasks: (c.tasks || starterTasks).map(normalizeTask),
+      records: c.records || {},
+      rewardText: makeBi(c.rewardText || starterRewards[2].name),
+      parentMessage: makeBi(c.parentMessage || ""),
+      rewards: (c.rewards && c.rewards.length ? c.rewards : starterRewards).map(r => ({ ...r, name: makeBi(r.name) })),
+      reminder: c.reminder || { enabled: false, time: "19:00" }
+    });
+
+    async function callGemini(payload, retries = 3, delay = 1000) {
+      const apiKey = "";
+      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
+      for (let i = 0; i < retries; i++) {
+        try {
+          const res = await fetch(apiUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+          });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return await res.json();
+        } catch (err) {
+          if (i === retries - 1) throw err;
+          await new Promise(r => setTimeout(r, delay * Math.pow(2, i)));
+        }
+      }
+    }
+
+    function isTaskScheduled(t, d) {
+      const s = t.schedule || { type: "daily", days: [] };
+      const w = d.getDay(); // 0 is Sunday, 1 is Monday ...
+      if (s.type === "daily") return true;
+      if (s.type === "weekdays") return w >= 1 && w <= 5;
+      if (s.type === "weekends") return w === 0 || w === 6;
+      if (s.type === "custom") return (s.days || []).includes(w);
+      return true;
+    }
+
+    function App() {
+      const now = clone(new Date());
+      const [lang, setLang] = useState("zh");
+      const [view, setView] = useState("month");
+      const [focusDate, setFocusDate] = useState(now);
+      const [children, setChildren] = useState([makeChild("快乐宝贝", "🧒")]);
+      const [activeId, setActiveId] = useState(null);
+      const [loaded, setLoaded] = useState(false);
+      const [newChildName, setNewChildName] = useState("");
+      const [selectedAvatar, setSelectedAvatar] = useState("🧒");
+      const [showChildMenu, setShowChildMenu] = useState(false);
+      const [celebrateInfo, setCelebrateInfo] = useState(null);
+      // Read initial family ID from URL parameter (e.g. ?family=mykids)
+      const initialFamilyId = useMemo(() => {
+        try {
+          const params = new URLSearchParams(window.location.search);
+          return params.get("family") || "my-family-default";
+        } catch (e) {
+          return "my-family-default";
+        }
+      }, []);
+
+      const [familyId, setFamilyId] = useState(initialFamilyId);
+      const [inputFamilyId, setInputFamilyId] = useState(initialFamilyId);
+      const [cloudStatus, setCloudStatus] = useState("connecting"); // 'connected' | 'connecting' | 'offline' | 'syncing'
+      const [cloudUserId, setCloudUserId] = useState("");
+      const [showCloudModal, setShowCloudModal] = useState(false);
+      const isRemoteUpdateRef = useRef(false);
+      const saveTimeoutRef = useRef(null);
+
+      // Parent/Child Mode and Security PIN
+      const [mode, setMode] = useState("parent");
+      const [pin, setPin] = useState("1234");
+      const [pinInput, setPinInput] = useState("");
+      const [pinModalOpen, setPinModalOpen] = useState(false);
+      const [pinError, setPinError] = useState("");
+
+      // Task creation & editing
+      const [newTaskName, setNewTaskName] = useState("");
+      const [newTaskCategory, setNewTaskCategory] = useState("learning");
+      const [newTaskPoints, setNewTaskPoints] = useState(2);
+      const [newTaskRepeat, setNewTaskRepeat] = useState("daily");
+      const [newTaskDays, setNewTaskDays] = useState([1, 2, 3, 4, 5]);
+      const [editingTask, setEditingTask] = useState(null);
+
+      // Reward creation
+      const [newRewardTitle, setNewRewardTitle] = useState("");
+      const [newRewardPoints, setNewRewardPoints] = useState(30);
+
+      const [aiModalOpen, setAiModalOpen] = useState(false);
+      const [aiActiveTab, setAiActiveTab] = useState("habits"); // 'habits' | 'story' | 'rewards'
+      const [aiAgeGroup, setAiAgeGroup] = useState("4-6岁 (幼儿园)");
+      const [aiFocusArea, setAiFocusArea] = useState("自主自理与收拾整理");
+      const [aiLoading, setAiLoading] = useState(false);
+      const [aiGeneratedTasks, setAiGeneratedTasks] = useState([]);
+      const [aiStoryResult, setAiStoryResult] = useState("");
+      const [aiGeneratedRewards, setAiGeneratedRewards] = useState([]);
+
+      // Stats range & Notification status
+      const [statsRange, setStatsRange] = useState("week");
+      const [toastMsg, setToastMsg] = useState("");
+      const fileInputRef = useRef(null);
+      const lastReminderRef = useRef("");
+
+      const T = UI[lang];
+
+      // Subscribe to cloud updates and listen to changes
+      useEffect(() => {
+        let unsubscribeDoc = () => {};
+
+        const unbindBridge = window.CloudBridge.onReady(bridge => {
+          if (!bridge.isReady) {
+            setCloudStatus("offline");
+            setLoaded(true);
+            return;
+          }
+
+          setCloudUserId(bridge.userId || "anonymous");
+          setCloudStatus("connected");
+
+          unsubscribeDoc = bridge.subscribeCalendar(
+            familyId,
+            remoteData => {
+              if (remoteData && remoteData.children && Array.isArray(remoteData.children) && remoteData.children.length > 0) {
+                isRemoteUpdateRef.current = true;
+                const cleaned = remoteData.children.map(normalizeChild);
+                setChildren(cleaned);
+                if (remoteData.activeId && cleaned.some(c => c.id === remoteData.activeId)) {
+                  setActiveId(remoteData.activeId);
+                }
+                if (remoteData.pin) setPin(remoteData.pin);
+                if (remoteData.lang) setLang(remoteData.lang);
+                setLoaded(true);
+                setTimeout(() => {
+                  isRemoteUpdateRef.current = false;
+                }, 300);
+              } else {
+                setLoaded(true);
+              }
+            },
+            err => {
+              console.warn("Realtime listen error, falling back to local memory:", err);
+              setCloudStatus("offline");
+              setLoaded(true);
+            }
+          );
+        });
+
+        return () => {
+          unsubscribeDoc();
+          unbindBridge();
+        };
+      }, [familyId]);
+
+      // Debounced push to cloud when state changes
+      useEffect(() => {
+        if (!loaded || isRemoteUpdateRef.current) return;
+
+        if (window.CloudBridge && window.CloudBridge.isReady) {
+          setCloudStatus("syncing");
+          if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+
+          saveTimeoutRef.current = setTimeout(async () => {
+            const payload = {
+              version: 6,
+              lang,
+              children,
+              activeId,
+              pin,
+              savedAt: new Date().toISOString()
+            };
+            const ok = await window.CloudBridge.saveCalendar(familyId, payload);
+            setCloudStatus(ok ? "connected" : "offline");
+          }, 600);
+        }
+      }, [loaded, lang, children, activeId, pin, familyId]);
+
+      const currentChild = children.find(c => c.id === activeId) || children[0];
+      const year = focusDate.getFullYear();
+      const month = focusDate.getMonth();
+      const calCells = useMemo(() => monthCells(year, month), [year, month]);
+      const currentWeekDays = Array.from({ length: 7 }, (_, i) => addDays(getMonday(focusDate), i));
+
+      const updateCurrentChild = fn => {
+        setChildren(prev => prev.map(c => (c.id === currentChild.id ? fn(c) : c)));
+      };
+
+      const getTasksForDay = d => currentChild.tasks.filter(t => isTaskScheduled(t, d));
+      const getPointsForDay = d =>
+        getTasksForDay(d).reduce((sum, t) => sum + ((currentChild.records[dateKey(d)] || {})[t.id] ? t.points : 0), 0);
+      const getDoneCountForDay = d =>
+        getTasksForDay(d).filter(t => (currentChild.records[dateKey(d)] || {})[t.id]).length;
+      const isPerfectDay = d => {
+        const tasks = getTasksForDay(d);
+        return tasks.length > 0 && tasks.every(t => (currentChild.records[dateKey(d)] || {})[t.id]);
+      };
+
+      // Month stats
+      const monthTotalPoints = useMemo(() => {
+        let sum = 0;
+        const totalDays = new Date(year, month + 1, 0).getDate();
+        for (let day = 1; day <= totalDays; day++) {
+          sum += getPointsForDay(new Date(year, month, day));
+        }
+        return sum;
+      }, [currentChild, year, month]);
+
+      const totalCompletedChecks = Object.values(currentChild.records).reduce(
+        (sum, rec) => sum + currentChild.tasks.filter(t => rec[t.id]).length,
+        0
+      );
+
+      // Streak calculation
+      const streakCount = useMemo(() => {
+        let checkDay = clone(now);
+        let count = 0;
+        if (!isPerfectDay(checkDay)) {
+          checkDay = addDays(checkDay, -1);
+        }
+        for (let i = 0; i < 365; i++) {
+          if (isPerfectDay(checkDay)) {
+            count++;
+            checkDay = addDays(checkDay, -1);
+          } else {
+            break;
+          }
+        }
+        return count;
+      }, [currentChild]);
+
+      const perfectDaysCount = Object.keys(currentChild.records).filter(k => {
+        const [yy, mm, dd] = k.split("-").map(Number);
+        return isPerfectDay(new Date(yy, mm - 1, dd));
+      }).length;
+
+      // Badges
+      const badges = lang === "zh" ? [
+        { emoji: "🌱", name: "迈出第一步", desc: "完成任意 1 个任务打卡", earned: totalCompletedChecks >= 1 },
+        { emoji: "🔥", name: "坚持小火苗", desc: "连续 3 天全部任务完成", earned: streakCount >= 3 },
+        { emoji: "⚡", name: "自律闪电侠", desc: "连续 7 天全部任务完成", earned: streakCount >= 7 },
+        { emoji: "🏆", name: "习惯大达人", desc: "累计完成 50 次任务打卡", earned: totalCompletedChecks >= 50 },
+        { emoji: "💯", name: "百星勇士", desc: "本月累积获得 100 颗星币", earned: monthTotalPoints >= 100 },
+        { emoji: "🌈", name: "黄金恒心之星", desc: "累计达成 10 个完美日", earned: perfectDaysCount >= 10 }
+      ] : [
+        { emoji: "🌱", name: "First Step", desc: "Complete 1 check-in task", earned: totalCompletedChecks >= 1 },
+        { emoji: "🔥", name: "Spark of Habit", desc: "3-day full completion streak", earned: streakCount >= 3 },
+        { emoji: "⚡", name: "Discipline Star", desc: "7-day full completion streak", earned: streakCount >= 7 },
+        { emoji: "🏆", name: "Task Master", desc: "Complete 50 tasks in total", earned: totalCompletedChecks >= 50 },
+        { emoji: "💯", name: "100-Star Hero", desc: "Earn 100 stars this month", earned: monthTotalPoints >= 100 },
+        { emoji: "🌈", name: "Perseverance", desc: "Achieve 10 perfect days", earned: perfectDaysCount >= 10 }
+      ];
+
+      // Charts calculation
+      const statDays = statsRange === "week"
+        ? Array.from({ length: 7 }, (_, i) => addDays(getMonday(focusDate), i))
+        : Array.from({ length: new Date(year, month + 1, 0).getDate() }, (_, i) => new Date(year, month, i + 1));
+
+      const statPlannedCount = statDays.reduce((sum, d) => sum + getTasksForDay(d).length, 0);
+      const statDoneCount = statDays.reduce((sum, d) => sum + getDoneCountForDay(d), 0);
+      const statPercentage = statPlannedCount ? Math.round((statDoneCount / statPlannedCount) * 100) : 0;
+      const maxPointsInPeriod = Math.max(1, ...statDays.map(getPointsForDay));
+
+      const toggleTaskCheck = (d, task) => {
+        const k = dateKey(d);
+        const wasDone = Boolean((currentChild.records[k] || {})[task.id]);
+        updateCurrentChild(child => ({
+          ...child,
+          records: {
+            ...child.records,
+            [k]: {
+              ...(child.records[k] || {}),
+              [task.id]: !wasDone
+            }
+          }
+        }));
+
+        if (!wasDone) {
+          playCheerSound();
+          setCelebrateInfo({
+            emoji: task.emoji,
+            points: task.points,
+            name: getLocal(task.name, lang)
+          });
+          setTimeout(() => setCelebrateInfo(null), 1600);
+        }
+      };
+
+      const handleGenerateHabitsAI = async () => {
+        setAiLoading(true);
+        setAiGeneratedTasks([]);
+        try {
+          const systemPrompt = `You are a supportive positive parenting and child psychology expert.
+Generate exactly 4 motivating, fun, positive habit tasks for a child named "${currentChild.name}".
+Age Group: ${aiAgeGroup}.
+Focus Area: ${aiFocusArea}.
+Return a strict JSON ARRAY of objects with fields:
+- "nameZh": concise task name in Chinese (max 10 words)
+- "nameEn": concise task name in English
+- "emoji": appropriate single emoji
+- "category": one of ["learning", "chores", "health", "creativity", "social"]
+- "points": integer between 1 and 3
+- "scheduleType": one of ["daily", "weekdays", "weekends"]`;
+
+          const payload = {
+            contents: [{ parts: [{ text: `Generate 4 personalized habit tasks for ${currentChild.name}.` }] }],
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+            generationConfig: {
+              responseMimeType: "application/json",
+              responseSchema: {
+                type: "ARRAY",
+                items: {
+                  type: "OBJECT",
+                  properties: {
+                    nameZh: { type: "STRING" },
+                    nameEn: { type: "STRING" },
+                    emoji: { type: "STRING" },
+                    category: { type: "STRING", enum: ["learning", "chores", "health", "creativity", "social"] },
+                    points: { type: "INTEGER" },
+                    scheduleType: { type: "STRING", enum: ["daily", "weekdays", "weekends"] }
+                  },
+                  required: ["nameZh", "nameEn", "emoji", "category", "points", "scheduleType"]
+                }
+              }
+            }
+          };
+
+          const result = await callGemini(payload);
+          const rawJson = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (rawJson) {
+            const parsed = JSON.parse(rawJson);
+            setAiGeneratedTasks(parsed);
+          }
+        } catch (err) {
+          showToast("AI 生成习惯出错，请稍后重试");
+        } finally {
+          setAiLoading(false);
+        }
+      };
+
+      const handleGenerateStoryAI = async (customDate = focusDate) => {
+        setAiLoading(true);
+        setAiStoryResult("");
+        const dateStr = dateKey(customDate);
+        const dayTasks = getTasksForDay(customDate);
+        const completedList = dayTasks.filter(t => (currentChild.records[dateStr] || {})[t.id]);
+        const completedNames = completedList.map(t => getLocal(t.name, lang)).join("、");
+
+        try {
+          const systemPrompt = `You are a warm, imaginative children's story writer and encouraging parent coach.
+Write an inspiring, warm 150-word mini bedtime story / praise letter for ${currentChild.name} (${currentChild.avatar}).
+Context:
+- Today's date: ${dateStr}
+- Completed tasks today: ${completedNames || "今天孩子在努力探索新的一天！"}
+- Current streak: ${streakCount} consecutive days
+- Language: ${lang === "zh" ? "Chinese" : "English"}
+Incorporate their accomplishments naturally, portraying the child as a courageous, kind, and persistent little hero. Keep the tone loving, fun, and empowering.`;
+
+          const payload = {
+            contents: [{ parts: [{ text: `Write today's hero praise story for ${currentChild.name}.` }] }],
+            systemInstruction: { parts: [{ text: systemPrompt }] }
+          };
+
+          const result = await callGemini(payload);
+          const storyText = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (storyText) {
+            setAiStoryResult(storyText);
+          }
+        } catch (err) {
+          showToast("AI 生成故事出错，请稍后重试");
+        } finally {
+          setAiLoading(false);
+        }
+      };
+
+      const handleGenerateRewardsAI = async () => {
+        setAiLoading(true);
+        setAiGeneratedRewards([]);
+        try {
+          const systemPrompt = `You are an expert in non-material, connection-oriented family positive reinforcement.
+Suggest 3 creative, high-connection, experiential rewards for a child named "${currentChild.name}" (e.g., family tent night, choosing weekend dinner, parent playing lego together, free homework pass).
+Return a strict JSON ARRAY with:
+- "nameZh": reward title in Chinese
+- "nameEn": reward title in English
+- "emoji": single cute emoji
+- "points": integer star cost between 15 and 80`;
+
+          const payload = {
+            contents: [{ parts: [{ text: `Suggest 3 experiential rewards for ${currentChild.name}.` }] }],
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+            generationConfig: {
+              responseMimeType: "application/json",
+              responseSchema: {
+                type: "ARRAY",
+                items: {
+                  type: "OBJECT",
+                  properties: {
+                    nameZh: { type: "STRING" },
+                    nameEn: { type: "STRING" },
+                    emoji: { type: "STRING" },
+                    points: { type: "INTEGER" }
+                  },
+                  required: ["nameZh", "nameEn", "emoji", "points"]
+                }
+              }
+            }
+          };
+
+          const result = await callGemini(payload);
+          const raw = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (raw) {
+            setAiGeneratedRewards(JSON.parse(raw));
+          }
+        } catch (err) {
+          showToast("AI 生成奖励出错，请稍后重试");
+        } finally {
+          setAiLoading(false);
+        }
+      };
+
+      const addAITaskToCalendar = (taskItem) => {
+        const newTaskObj = {
+          id: Date.now() + Math.floor(Math.random() * 1000),
+          emoji: taskItem.emoji || "🌟",
+          name: { zh: taskItem.nameZh, en: taskItem.nameEn },
+          category: taskItem.category || "learning",
+          points: Number(taskItem.points) || 2,
+          schedule: { type: taskItem.scheduleType || "daily", days: [] }
+        };
+        updateCurrentChild(c => ({ ...c, tasks: [...c.tasks, newTaskObj] }));
+        showToast(lang === "zh" ? `✅ 已将「${taskItem.nameZh}」加入任务库` : `✅ Added "${taskItem.nameEn}" to calendar`);
+      };
+
+      const addAIRewardToCalendar = (rewardItem) => {
+        const newReward = {
+          id: Date.now() + Math.floor(Math.random() * 1000),
+          points: Number(rewardItem.points) || 30,
+          emoji: rewardItem.emoji || "🎁",
+          name: { zh: rewardItem.nameZh, en: rewardItem.nameEn }
+        };
+        updateCurrentChild(c => ({ ...c, rewards: [...c.rewards, newReward] }));
+        showToast(lang === "zh" ? `✅ 已添加奖励「${rewardItem.nameZh}」` : `✅ Added reward "${rewardItem.nameEn}"`);
+      };
+
+      // Add child
+      const handleAddChild = () => {
+        if (!newChildName.trim()) return;
+        const newKid = makeChild(newChildName.trim(), selectedAvatar || "🧒");
+        setChildren(prev => [...prev, newKid]);
+        setActiveId(newKid.id);
+        setNewChildName("");
+        setShowChildMenu(false);
+        showToast(lang === "zh" ? `🎉 成功添加宝贝：${newKid.name}` : `🎉 Child profile added: ${newKid.name}`);
+      };
+
+      const handleDeleteChild = (id, name) => {
+        if (children.length <= 1) {
+          showToast(lang === "zh" ? "⚠️ 至少需要保留一个宝贝档案哦" : "⚠️ At least one child profile must be kept");
+          return;
+        }
+        const remaining = children.filter(c => c.id !== id);
+        setChildren(remaining);
+        if (activeId === id) {
+          setActiveId(remaining[0].id);
+        }
+        showToast(lang === "zh" ? `已删除 ${name} 的档案` : `Deleted ${name}'s profile`);
+      };
+
+      // Task actions
+      const handleAddTask = () => {
+        if (!newTaskName.trim()) return;
+        const cat = categories[newTaskCategory] || categories.learning;
+        const taskObj = {
+          id: Date.now(),
+          emoji: cat.emoji,
+          name: { zh: newTaskName.trim(), en: newTaskName.trim() },
+          category: newTaskCategory,
+          points: Math.max(1, Number(newTaskPoints) || 1),
+          schedule: {
+            type: newTaskRepeat,
+            days: newTaskRepeat === "custom" ? newTaskDays : []
+          }
+        };
+        updateCurrentChild(c => ({ ...c, tasks: [...c.tasks, taskObj] }));
+        setNewTaskName("");
+      };
+
+      const handleSaveEdit = () => {
+        if (!editingTask || !getLocal(editingTask.name, lang).trim()) return;
+        updateCurrentChild(c => ({
+          ...c,
+          tasks: c.tasks.map(t => (t.id === editingTask.id ? normalizeTask(editingTask) : t))
+        }));
+        setEditingTask(null);
+      };
+
+      const copyMobileShareLink = () => {
+        const url = new URL(window.location.href);
+        url.searchParams.set("family", familyId);
+        const textToCopy = url.toString();
+
+        const textArea = document.createElement("textarea");
+        textArea.value = textToCopy;
+        textArea.style.position = "fixed";
+        textArea.style.left = "-9999px";
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+        try {
+          document.execCommand("copy");
+          showToast(T.copied);
+        } catch (err) {
+          showToast(`URL: ${textToCopy}`);
+        }
+        document.body.removeChild(textArea);
+      };
+
+      // Export / Import
+      const exportFamilyData = () => {
+        const payload = {
+          app: "Kids Behaviour Reward Calendar",
+          version: 6,
+          lang,
+          exportedAt: new Date().toISOString(),
+          activeId,
+          children
+        };
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `Kids_Reward_Data_${familyId}_${dateKey(new Date())}.json`;
+        link.click();
+        URL.revokeObjectURL(url);
+        showToast(T.exported);
+      };
+
+      const importFamilyData = e => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = event => {
+          try {
+            const data = JSON.parse(event.target.result);
+            if (!data.children || !Array.isArray(data.children) || !data.children.length) throw new Error();
+            const cleaned = data.children.map(normalizeChild);
+            setChildren(cleaned);
+            setActiveId(data.activeId && cleaned.some(c => c.id === data.activeId) ? data.activeId : cleaned[0].id);
+            showToast(T.restored);
+          } catch (err) {
+            showToast(T.badBackup);
+          }
+        };
+        reader.readAsText(file);
+        e.target.value = "";
+      };
+
+      const showToast = msg => {
+        setToastMsg(msg);
+        setTimeout(() => setToastMsg(""), 3500);
+      };
+
+      // Notification setup
+      const toggleReminder = async enable => {
+        if (enable) {
+          if ("Notification" in window) {
+            const perm = Notification.permission === "granted" ? "granted" : await Notification.requestPermission();
+            if (perm !== "granted") {
+              showToast(lang === "zh" ? "⚠️ 请在浏览器设置中允许通知权限" : "⚠️ Notification permission denied");
+              return;
+            }
+          }
+        }
+        updateCurrentChild(c => ({
+          ...c,
+          reminder: { ...c.reminder, enabled: enable }
+        }));
+      };
+
+      // Reminder interval checker
+      useEffect(() => {
+        if (!loaded) return;
+        const interval = setInterval(() => {
+          const d = new Date();
+          const k = dateKey(d);
+          const hhmm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+          if (currentChild.reminder?.enabled && hhmm === currentChild.reminder.time && lastReminderRef.current !== `${currentChild.id}-${k}`) {
+            const pendingTasks = getTasksForDay(d).filter(t => !(currentChild.records[k] || {})[t.id]);
+            if (pendingTasks.length > 0) {
+              lastReminderRef.current = `${currentChild.id}-${k}`;
+              const textList = pendingTasks.slice(0, 3).map(t => `${t.emoji} ${getLocal(t.name, lang)}`).join("、 ");
+              const body = `${lang === "zh" ? "还有任务待完成：" : "Unfinished tasks:"} ${textList}`;
+              if ("Notification" in window && Notification.permission === "granted") {
+                new Notification(`${currentChild.name} · ${T.reminder}`, { body });
+              }
+              showToast(`🔔 ${currentChild.name}: ${body}`);
+            }
+          }
+        }, 30000);
+        return () => clearInterval(interval);
+      }, [loaded, currentChild, lang]);
+
+      // Navigation
+      const shiftDate = step => {
+        if (view === "month") {
+          setFocusDate(new Date(year, month + step, 1));
+        } else if (view === "week") {
+          setFocusDate(addDays(focusDate, step * 7));
+        } else {
+          setFocusDate(addDays(focusDate, step));
+        }
+      };
+
+      const verifyUnlock = () => {
+        if (pinInput === pin) {
+          setMode("parent");
+          setPinModalOpen(false);
+          setPinInput("");
+          setPinError("");
+          showToast(lang === "zh" ? "🔓 已切换至家长管理模式" : "🔓 Switched to Parent Mode");
+        } else {
+          setPinError(T.wrongPin);
+        }
+      };
+
+      const weekLabels = lang === "zh" ? ["一", "二", "三", "四", "五", "六", "日"] : ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+      const repeatLabelMap = {
+        daily: T.everyday,
+        weekdays: T.weekdays,
+        weekends: T.weekends,
+        custom: T.selected
+      };
+
+      return (
+        <div className="max-w-7xl mx-auto px-3 py-4 sm:px-6 sm:py-7">
+          {/* Main Top Header */}
+          <header className="rounded-3xl bg-gradient-to-r from-amber-300 via-orange-200 to-rose-200 p-5 sm:p-7 shadow-sm border border-amber-200/60 relative">
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 relative z-10">
+              <div>
+                <div className="flex items-center gap-2 flex-wrap mb-1">
+                  <span className="inline-block px-3 py-1 bg-white/80 backdrop-blur-sm rounded-full text-xs sm:text-sm font-black text-orange-600 shadow-sm">
+                    {T.tag}
+                  </span>
+                  {/* Cloud status badge */}
+                  <button
+                    onClick={() => setShowCloudModal(true)}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-black transition border shadow-xs ${
+                      cloudStatus === "connected"
+                        ? "bg-emerald-100/90 text-emerald-800 border-emerald-300"
+                        : cloudStatus === "syncing"
+                        ? "bg-sky-100/90 text-sky-800 border-sky-300"
+                        : "bg-amber-100/90 text-amber-800 border-amber-300"
+                    }`}
+                  >
+                    <Icons.Cloud size={13} />
+                    <span>
+                      {cloudStatus === "connected" ? T.cloudLive : cloudStatus === "syncing" ? T.cloudSyncing : T.cloudLocal}
+                    </span>
+                  </button>
+                </div>
+                <h1 className="text-2xl sm:text-4xl font-black text-slate-800 tracking-tight flex items-center gap-2">
+                  <span>{currentChild.avatar}</span>
+                  <span>{currentChild.name} 的 {T.title}</span>
+                </h1>
+                <p className="text-xs sm:text-sm text-slate-600 mt-1 font-medium flex items-center gap-2 flex-wrap">
+                  <span>{lang === "zh" ? "支持手机/平板/电脑实时同步 · 习惯打卡 · 星币勋章" : "Cloud Sync for Mobile/Tablet/PC · Habit Tracker · Star Badges"}</span>
+                  <button
+                    onClick={() => setShowCloudModal(true)}
+                    className="underline text-orange-700 hover:text-orange-900 font-bold"
+                  >
+                    [{T.deployTips}]
+                  </button>
+                </p>
+              </div>
+
+              {/* Action Buttons: Cloud Sync, Language, Parent/Child Mode, Switch Child */}
+              <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+                <button
+                  onClick={() => {
+                    setAiModalOpen(true);
+                    if (!aiGeneratedTasks.length && aiActiveTab === "habits") {
+                      handleGenerateHabitsAI();
+                    }
+                  }}
+                  className="bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 text-white px-3.5 py-2.5 rounded-2xl shadow-sm font-black text-xs sm:text-sm transition flex items-center gap-1.5 active:scale-95"
+                  title={T.aiAssistant}
+                >
+                  <Icons.Sparkles size={17} className="text-amber-300" />
+                  <span>{T.aiAssistant}</span>
+                </button>
+
+                <button
+                  onClick={() => setShowCloudModal(true)}
+                  className="bg-white/90 hover:bg-white text-sky-800 px-3.5 py-2.5 rounded-2xl shadow-sm font-black text-xs sm:text-sm transition flex items-center gap-1.5 border border-sky-100"
+                  title={T.cloudSync}
+                >
+                  <Icons.Smartphone size={17} className="text-sky-600" />
+                  <span className="hidden sm:inline">{T.cloudSync}</span>
+                </button>
+
+                <button
+                  onClick={() => setLang(l => (l === "zh" ? "en" : "zh"))}
+                  className="bg-white/90 hover:bg-white px-3.5 py-2.5 rounded-2xl shadow-sm font-bold text-xs sm:text-sm text-slate-700 transition flex items-center gap-1.5"
+                >
+                  <span className="text-base">🌐</span>
+                  <span>{lang === "zh" ? "English" : "中文"}</span>
+                </button>
+
+                {mode === "parent" ? (
+                  <button
+                    onClick={() => {
+                      setMode("child");
+                      showToast(T.locked);
+                    }}
+                    className="bg-emerald-500 hover:bg-emerald-600 text-white px-4 py-2.5 rounded-2xl shadow-sm font-black text-xs sm:text-sm transition flex items-center gap-2"
+                  >
+                    <Icons.Unlock size={17} />
+                    <span>{T.parent}</span>
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => {
+                      setPinError("");
+                      setPinInput("");
+                      setPinModalOpen(true);
+                    }}
+                    className="bg-violet-600 hover:bg-violet-700 text-white px-4 py-2.5 rounded-2xl shadow-sm font-black text-xs sm:text-sm transition flex items-center gap-2"
+                  >
+                    <Icons.Lock size={17} />
+                    <span>{T.child}</span>
+                  </button>
+                )}
+
+                {/* Child Switcher Button */}
+                <button
+                  onClick={() => setShowChildMenu(true)}
+                  className="bg-white hover:bg-slate-50 text-slate-800 px-4 py-2.5 rounded-2xl shadow-sm font-black text-xs sm:text-sm flex items-center gap-2 border border-orange-100 transition active:scale-95"
+                >
+                  <span className="text-xl leading-none">{currentChild.avatar}</span>
+                  <span className="max-w-[110px] truncate">{currentChild.name}</span>
+                  <Icons.Users size={16} className="text-slate-400" />
+                </button>
+              </div>
+            </div>
+          </header>
+
+          <div className="flex flex-wrap items-center justify-between gap-3 mt-4 bg-white rounded-2xl p-2.5 shadow-sm border border-slate-100">
+            {/* View Selector */}
+            <div className="flex bg-slate-100 p-1 rounded-xl">
+              {[
+                ["month", T.month],
+                ["week", T.week],
+                ["day", T.day]
+              ].map(([k, label]) => (
+                <button
+                  key={k}
+                  onClick={() => setView(k)}
+                  className={`px-4 sm:px-6 py-2 rounded-lg font-black text-xs sm:text-sm transition ${
+                    view === k ? "bg-white text-sky-700 shadow-sm" : "text-slate-500 hover:text-slate-800"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {/* Date Quick Jump & Data Management */}
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setFocusDate(now)}
+                className="px-3.5 py-2 bg-sky-50 hover:bg-sky-100 text-sky-700 rounded-xl text-xs sm:text-sm font-black transition"
+              >
+                {T.today}
+              </button>
+
+              {mode === "parent" && (
+                <>
+                  <button
+                    onClick={exportFamilyData}
+                    className="px-3 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded-xl text-xs sm:text-sm font-bold flex items-center gap-1 transition"
+                    title={T.backup}
+                  >
+                    <Icons.Download size={15} />
+                    <span className="hidden sm:inline">{T.backup}</span>
+                  </button>
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    className="px-3 py-2 bg-violet-50 hover:bg-violet-100 text-violet-700 rounded-xl text-xs sm:text-sm font-bold flex items-center gap-1 transition"
+                    title={T.restore}
+                  >
+                    <Icons.Upload size={15} />
+                    <span className="hidden sm:inline">{T.restore}</span>
+                  </button>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".json,application/json"
+                    onChange={importFamilyData}
+                    className="hidden"
+                  />
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* In-app Toast Banner */}
+          {toastMsg && (
+            <div className="mt-3 p-3 bg-amber-50 border border-amber-200 text-amber-900 rounded-2xl text-xs sm:text-sm font-bold flex items-center justify-between shadow-sm animate-pop">
+              <span>{toastMsg}</span>
+              <button onClick={() => setToastMsg("")} className="text-amber-700 hover:text-amber-900 ml-2">
+                <Icons.Close size={16} />
+              </button>
+            </div>
+          )}
+
+          {}
+          <section className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
+            <div className="bg-gradient-to-br from-orange-50 to-orange-100/60 border border-orange-200/80 p-4 rounded-2xl flex items-center gap-3.5 shadow-sm">
+              <div className="w-12 h-12 rounded-2xl bg-orange-500 text-white flex items-center justify-center shrink-0 shadow-sm shadow-orange-300">
+                <Icons.Flame size={24} />
+              </div>
+              <div>
+                <p className="text-2xl sm:text-3xl font-black text-orange-600 leading-tight">
+                  {streakCount} <span className="text-sm font-bold">{lang === "zh" ? "天" : "days"}</span>
+                </p>
+                <p className="text-[11px] sm:text-xs font-bold text-slate-500">{T.streak}</p>
+              </div>
+            </div>
+
+            <div className="bg-gradient-to-br from-amber-50 to-amber-100/60 border border-amber-200/80 p-4 rounded-2xl flex items-center gap-3.5 shadow-sm">
+              <div className="w-12 h-12 rounded-2xl bg-amber-500 text-white flex items-center justify-center shrink-0 shadow-sm shadow-amber-300">
+                <Icons.Medal size={24} />
+              </div>
+              <div>
+                <p className="text-2xl sm:text-3xl font-black text-amber-600 leading-tight">
+                  {badges.filter(b => b.earned).length} / {badges.length}
+                </p>
+                <p className="text-[11px] sm:text-xs font-bold text-slate-500">{T.badges}</p>
+              </div>
+            </div>
+
+            <div className="bg-gradient-to-br from-sky-50 to-sky-100/60 border border-sky-200/80 p-4 rounded-2xl flex items-center gap-3.5 shadow-sm">
+              <div className="w-12 h-12 rounded-2xl bg-sky-500 text-white flex items-center justify-center shrink-0 shadow-sm shadow-sky-300">
+                <Icons.BarChart size={24} />
+              </div>
+              <div>
+                <p className="text-2xl sm:text-3xl font-black text-sky-600 leading-tight">
+                  {statPercentage}%
+                </p>
+                <p className="text-[11px] sm:text-xs font-bold text-slate-500">
+                  {statsRange === "week" ? T.weekly : T.monthly} {T.rate}
+                </p>
+              </div>
+            </div>
+
+            <div className="bg-gradient-to-br from-violet-50 to-violet-100/60 border border-violet-200/80 p-4 rounded-2xl flex items-center gap-3.5 shadow-sm">
+              <div className="w-12 h-12 rounded-2xl bg-violet-500 text-white flex items-center justify-center shrink-0 shadow-sm shadow-violet-300">
+                <Icons.Trophy size={24} />
+              </div>
+              <div>
+                <p className="text-2xl sm:text-3xl font-black text-violet-600 leading-tight">
+                  {monthTotalPoints} ⭐
+                </p>
+                <p className="text-[11px] sm:text-xs font-bold text-slate-500">{T.points}</p>
+              </div>
+            </div>
+          </section>
+
+          {}
+          <section className="mt-4 bg-white rounded-3xl shadow-sm border border-slate-100 p-4 sm:p-6">
+            {/* Header: Month / Week Navigation */}
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => shiftDate(-1)}
+                  className="w-10 h-10 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center justify-center transition"
+                >
+                  <Icons.ChevronLeft size={20} />
+                </button>
+                <div className="px-4 py-2 bg-sky-50 text-sky-900 rounded-2xl font-black text-base sm:text-xl flex items-center gap-2 border border-sky-100">
+                  <Icons.Calendar size={20} className="text-sky-600" />
+                  <span>
+                    {view === "month" && (lang === "zh" ? `${year} 年 ${month + 1} 月` : new Intl.DateTimeFormat("en", { month: "long", year: "numeric" }).format(focusDate))}
+                    {view === "week" && (lang === "zh" ? `${currentWeekDays[0].getMonth() + 1}月${currentWeekDays[0].getDate()}日 - ${currentWeekDays[6].getMonth() + 1}月${currentWeekDays[6].getDate()}日` : `${currentWeekDays[0].toLocaleDateString("en", { day: "numeric", month: "short" })} - ${currentWeekDays[6].toLocaleDateString("en", { day: "numeric", month: "short", year: "numeric" })}`)}
+                    {view === "day" && (lang === "zh" ? `${year} 年 ${month + 1} 月 ${focusDate.getDate()} 日` : focusDate.toLocaleDateString("en", { weekday: "long", day: "numeric", month: "long", year: "numeric" }))}
+                  </span>
+                </div>
+                <button
+                  onClick={() => shiftDate(1)}
+                  className="w-10 h-10 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 flex items-center justify-center transition"
+                >
+                  <Icons.ChevronRight size={20} />
+                </button>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <span className="text-xs sm:text-sm font-black px-3 py-1.5 bg-amber-50 text-amber-800 rounded-full border border-amber-200/60">
+                  🔥 {T.streak}: {streakCount} {lang === "zh" ? "天" : "d"}
+                </span>
+                <span className="text-xs sm:text-sm font-black px-3 py-1.5 bg-violet-50 text-violet-800 rounded-full border border-violet-200/60">
+                  ⭐ {monthTotalPoints} {T.pointsUnit}
+                </span>
+              </div>
+            </div>
+
+            {}
+            {view === "month" && (
+              <div>
+                <div className="grid grid-cols-7 gap-1.5 sm:gap-2 mb-2">
+                  {weekLabels.map((lbl, idx) => (
+                    <div
+                      key={idx}
+                      className={`p-2 text-center rounded-xl font-black text-xs sm:text-sm ${
+                        idx >= 5 ? "bg-amber-50 text-amber-800" : "bg-slate-50 text-slate-600"
+                      }`}
+                    >
+                      {lang === "zh" ? `周${lbl}` : lbl}
+                    </div>
+                  ))}
+                </div>
+
+                <div className="grid grid-cols-7 gap-1.5 sm:gap-2">
+                  {calCells.map((dayNum, idx) => {
+                    if (!dayNum) {
+                      return <div key={idx} className="min-h-[105px] sm:min-h-[140px] bg-slate-50/40 rounded-2xl" />;
+                    }
+                    const cellDate = new Date(year, month, dayNum);
+                    const isToday = sameDay(cellDate, now);
+                    const perfect = isPerfectDay(cellDate);
+                    const dayTasks = getTasksForDay(cellDate);
+                    const dayPoints = getPointsForDay(cellDate);
+
+                    return (
+                      <div
+                        key={idx}
+                        className={`min-h-[105px] sm:min-h-[140px] rounded-2xl p-1.5 sm:p-2.5 border transition flex flex-col justify-between ${
+                          isToday ? "ring-2 ring-sky-400 bg-sky-50/40 border-sky-200" : "border-slate-100 bg-white hover:border-slate-300"
+                        } ${perfect ? "bg-amber-50/40" : ""}`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <button
+                            onClick={() => {
+                              setFocusDate(cellDate);
+                              setView("day");
+                            }}
+                            className={`w-7 h-7 sm:w-8 sm:h-8 rounded-full flex items-center justify-center font-black text-xs sm:text-sm transition ${
+                              isToday ? "bg-sky-500 text-white shadow-sm" : "text-slate-700 hover:bg-slate-100"
+                            }`}
+                          >
+                            {dayNum}
+                          </button>
+                          <div className="flex items-center gap-1">
+                            {perfect && <span title="完美日" className="text-sm sm:text-base">🌟</span>}
+                            {dayPoints > 0 && (
+                              <span className="text-[10px] font-extrabold text-amber-600 hidden sm:inline">
+                                +{dayPoints}⭐
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Task Mini Chips */}
+                        <div className="space-y-1 my-1 overflow-y-auto max-h-[85px] no-scrollbar">
+                          {dayTasks.map(t => {
+                            const isDone = Boolean((currentChild.records[dateKey(cellDate)] || {})[t.id]);
+                            const catStyle = categories[t.category] || categories.learning;
+                            return (
+                              <button
+                                key={t.id}
+                                onClick={() => toggleTaskCheck(cellDate, t)}
+                                className={`w-full text-left px-1.5 py-1 rounded-lg text-[10px] sm:text-xs font-bold truncate flex items-center gap-1 border transition ${
+                                  isDone
+                                    ? `${catStyle.color} shadow-xs font-black`
+                                    : "bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100"
+                                }`}
+                              >
+                                <span className="shrink-0">{t.emoji}</span>
+                                <span className="truncate flex-1">{getLocal(t.name, lang)}</span>
+                                <span className={`w-3.5 h-3.5 rounded-full shrink-0 flex items-center justify-center ${
+                                  isDone ? "bg-emerald-600 text-white" : "border border-slate-300 bg-white"
+                                }`}>
+                                  {isDone && <Icons.Check size={10} />}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+
+                        <div className="text-[10px] text-right text-slate-400 font-bold">
+                          {getDoneCountForDay(cellDate)}/{dayTasks.length}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {}
+            {view === "week" && (
+              <div className="grid grid-cols-1 md:grid-cols-7 gap-3">
+                {currentWeekDays.map((d, idx) => {
+                  const isToday = sameDay(d, now);
+                  const perfect = isPerfectDay(d);
+                  const dayTasks = getTasksForDay(d);
+                  const dayPts = getPointsForDay(d);
+
+                  return (
+                    <div
+                      key={idx}
+                      className={`min-h-[380px] rounded-2xl p-3 border flex flex-col justify-between ${
+                        isToday ? "bg-sky-50/60 border-sky-300 ring-2 ring-sky-200" : "bg-white border-slate-100"
+                      } ${perfect ? "bg-amber-50/50" : ""}`}
+                    >
+                      <div>
+                        <button
+                          onClick={() => {
+                            setFocusDate(d);
+                            setView("day");
+                          }}
+                          className="w-full text-left pb-2 border-b border-slate-100 group"
+                        >
+                          <p className="text-xs font-extrabold text-slate-400 group-hover:text-sky-600">
+                            {lang === "zh" ? `星期${weekLabels[idx]}` : weekLabels[idx]}
+                          </p>
+                          <div className="flex items-center justify-between mt-1">
+                            <span className="text-2xl font-black text-slate-800">{d.getDate()}</span>
+                            {perfect && <span className="text-lg">🌟</span>}
+                          </div>
+                          <p className="text-[11px] font-bold text-amber-600 mt-0.5">
+                            {dayPts} {T.pointsUnit} · {getDoneCountForDay(d)}/{dayTasks.length} {T.complete}
+                          </p>
+                        </button>
+
+                        <div className="space-y-2 mt-3">
+                          {dayTasks.map(t => {
+                            const isDone = Boolean((currentChild.records[dateKey(d)] || {})[t.id]);
+                            const catStyle = categories[t.category] || categories.learning;
+                            return (
+                              <button
+                                key={t.id}
+                                onClick={() => toggleTaskCheck(d, t)}
+                                className={`w-full text-left p-2 rounded-xl text-xs font-bold border transition flex items-center gap-2 ${
+                                  isDone
+                                    ? `${catStyle.color} shadow-xs font-black`
+                                    : "bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100"
+                                }`}
+                              >
+                                <span className="text-base">{t.emoji}</span>
+                                <span className="flex-1 truncate">{getLocal(t.name, lang)}</span>
+                                <span className={`w-4 h-4 rounded-full shrink-0 flex items-center justify-center ${
+                                  isDone ? "bg-emerald-600 text-white" : "border border-slate-300 bg-white"
+                                }`}>
+                                  {isDone && <Icons.Check size={12} />}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {}
+            {view === "day" && (
+              <div className="max-w-4xl mx-auto py-2">
+                <div className="p-6 sm:p-8 rounded-3xl bg-gradient-to-r from-sky-100 via-amber-100 to-rose-100 border border-amber-200/70 shadow-sm flex flex-col sm:flex-row justify-between sm:items-end gap-4">
+                  <div>
+                    <span className="text-xs font-black text-sky-800 bg-white/70 px-3 py-1 rounded-full uppercase tracking-wider">
+                      {focusDate.toLocaleDateString(lang === "zh" ? "zh-CN" : "en-US", { weekday: "long" })}
+                    </span>
+                    <h2 className="text-5xl sm:text-6xl font-black text-slate-800 mt-2 tracking-tight">
+                      {focusDate.getDate()}
+                      <span className="text-2xl sm:text-3xl text-slate-500 font-bold ml-3">
+                        {focusDate.toLocaleDateString(lang === "zh" ? "zh-CN" : "en-US", { month: "long" })}
+                      </span>
+                    </h2>
+                  </div>
+                  <div className="sm:text-right">
+                    <p className="text-4xl sm:text-5xl font-black text-orange-600">
+                      {getPointsForDay(focusDate)} <span className="text-xl sm:text-2xl">{T.pointsUnit}</span>
+                    </p>
+                    <p className="text-sm font-bold text-slate-600 mt-1">
+                      {T.complete} {getDoneCountForDay(focusDate)} / {getTasksForDay(focusDate).length}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Big Task Buttons for Children */}
+                <div className="grid sm:grid-cols-2 gap-3.5 mt-6">
+                  {getTasksForDay(focusDate).map(t => {
+                    const isDone = Boolean((currentChild.records[dateKey(focusDate)] || {})[t.id]);
+                    const catStyle = categories[t.category] || categories.learning;
+                    return (
+                      <button
+                        key={t.id}
+                        onClick={() => toggleTaskCheck(focusDate, t)}
+                        className={`w-full flex items-center text-left p-4 sm:p-5 rounded-2xl border-2 transition transform active:scale-95 shadow-sm min-h-[92px] ${
+                          isDone
+                            ? `${catStyle.color} ring-2 ring-emerald-300 border-emerald-300`
+                            : "bg-white hover:bg-slate-50 text-slate-700 border-slate-200"
+                        }`}
+                      >
+                        <span className="text-4xl sm:text-5xl shrink-0 mr-4 animate-float leading-none">
+                          {t.emoji}
+                        </span>
+                        <div className="flex-1 min-w-0 pr-2">
+                          <p className="text-base sm:text-lg font-black leading-snug">
+                            {getLocal(t.name, lang)}
+                          </p>
+                          <span className="inline-block mt-1 text-xs font-black text-amber-700 bg-amber-100 px-2.5 py-0.5 rounded-full">
+                            +{t.points} ⭐
+                          </span>
+                        </div>
+                        <div
+                          className={`w-9 h-9 rounded-full shrink-0 flex items-center justify-center transition ${
+                            isDone ? "bg-emerald-500 text-white shadow-md shadow-emerald-200" : "border-2 border-slate-300 bg-white"
+                          }`}
+                        >
+                          {isDone && <Icons.Check size={22} strokeWidth={3} />}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {!getTasksForDay(focusDate).length && (
+                  <div className="p-10 mt-6 text-center bg-slate-50 rounded-3xl border border-dashed border-slate-200">
+                    <p className="text-base font-bold text-slate-500">{T.noTasks}</p>
+                  </div>
+                )}
+
+                <div className="mt-6 flex flex-col sm:flex-row gap-3">
+                  <button
+                    onClick={() => {
+                      setAiActiveTab("story");
+                      setAiModalOpen(true);
+                      handleGenerateStoryAI(focusDate);
+                    }}
+                    className="flex-1 p-4 rounded-3xl bg-gradient-to-r from-amber-400 via-orange-400 to-rose-400 hover:from-amber-500 hover:to-rose-500 text-white font-black text-sm sm:text-base flex items-center justify-center gap-2.5 shadow-md shadow-orange-200 transition active:scale-98"
+                  >
+                    <Icons.Sparkles size={20} className="text-amber-100" />
+                    <span>{T.aiStoryBtn}</span>
+                  </button>
+                </div>
+
+                {/* Parent Encouragement Quote */}
+                <div className="mt-4 p-5 sm:p-6 bg-violet-50/80 rounded-3xl border border-violet-100 flex items-start gap-4">
+                  <span className="text-3xl">💌</span>
+                  <div>
+                    <h4 className="text-sm font-black text-violet-900">{T.encouragement}</h4>
+                    <p className="text-sm sm:text-base font-semibold text-violet-800 mt-1">
+                      {getLocal(currentChild.parentMessage, lang) || (lang === "zh" ? "坚持就是胜利，每天迈出小小一步！" : "One small step every day leads to great things!")}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+          </section>
+
+          {}
+          <section className="grid lg:grid-cols-2 gap-5 mt-6">
+            {/* Badges */}
+            <div className="bg-white rounded-3xl p-5 sm:p-6 border border-slate-100 shadow-sm">
+              <h3 className="text-base sm:text-lg font-black text-slate-800 flex items-center gap-2 mb-4">
+                <Icons.Medal className="text-amber-500" />
+                <span>{T.achievement}</span>
+              </h3>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                {badges.map((b, i) => (
+                  <div
+                    key={i}
+                    className={`p-3.5 rounded-2xl text-center border transition ${
+                      b.earned
+                        ? "bg-gradient-to-b from-amber-50 to-amber-100/40 border-amber-200 shadow-xs"
+                        : "bg-slate-50/60 border-slate-100 opacity-40 grayscale"
+                    }`}
+                  >
+                    <div className="text-3xl sm:text-4xl mb-1">{b.earned ? b.emoji : "🔒"}</div>
+                    <p className="text-xs sm:text-sm font-black text-slate-800 truncate">{b.name}</p>
+                    <p className="text-[10px] text-slate-500 mt-0.5 leading-tight">{b.desc}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Analytics Histogram */}
+            <div className="bg-white rounded-3xl p-5 sm:p-6 border border-slate-100 shadow-sm flex flex-col justify-between">
+              <div>
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-base sm:text-lg font-black text-slate-800 flex items-center gap-2">
+                    <Icons.BarChart className="text-sky-500" />
+                    <span>{T.stats}</span>
+                  </h3>
+                  <div className="flex bg-slate-100 p-1 rounded-xl text-xs font-bold">
+                    <button
+                      onClick={() => setStatsRange("week")}
+                      className={`px-3 py-1 rounded-lg transition ${
+                        statsRange === "week" ? "bg-white text-sky-700 shadow-xs font-black" : "text-slate-500"
+                      }`}
+                    >
+                      {T.weekly}
+                    </button>
+                    <button
+                      onClick={() => setStatsRange("month")}
+                      className={`px-3 py-1 rounded-lg transition ${
+                        statsRange === "month" ? "bg-white text-sky-700 shadow-xs font-black" : "text-slate-500"
+                      }`}
+                    >
+                      {T.monthly}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex items-baseline justify-between">
+                  <div>
+                    <span className="text-3xl sm:text-4xl font-black text-sky-600">{statPercentage}%</span>
+                    <p className="text-xs font-bold text-slate-500 mt-0.5">
+                      {T.complete} {statDoneCount} / {T.planned} {statPlannedCount}
+                    </p>
+                  </div>
+                  <span className="text-xs font-bold text-slate-400">
+                    {statsRange === "week" ? (lang === "zh" ? "本周打卡柱状图" : "Weekly trend") : (lang === "zh" ? "本月打卡柱状图" : "Monthly trend")}
+                  </span>
+                </div>
+              </div>
+
+              {/* Bar Chart Visual */}
+              <div className="flex items-end gap-1 sm:gap-1.5 h-32 pt-5 mt-3 border-b border-slate-100">
+                {statDays.map((d, i) => {
+                  const pts = getPointsForDay(d);
+                  const heightPercent = Math.min(100, Math.max(8, (pts / maxPointsInPeriod) * 100));
+                  return (
+                    <div key={i} className="flex-1 flex flex-col items-center gap-1 group relative">
+                      <div
+                        className={`w-full rounded-t-lg transition-all ${
+                          pts > 0 ? "bg-sky-400 group-hover:bg-sky-500" : "bg-slate-200/70"
+                        }`}
+                        style={{ height: `${heightPercent}%` }}
+                      />
+                      <span className="text-[9px] text-slate-400 font-bold hidden sm:inline truncate">
+                        {d.getDate()}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </section>
+
+          {}
+          <section className="grid lg:grid-cols-2 gap-5 mt-6">
+            {/* Rewards */}
+            <div className="bg-white rounded-3xl p-5 sm:p-6 border border-slate-100 shadow-sm">
+              <h3 className="text-base sm:text-lg font-black text-slate-800 flex items-center gap-2 mb-4">
+                <Icons.Gift className="text-rose-500" />
+                <span>{T.reward}</span>
+              </h3>
+
+              <div className="space-y-2.5 max-h-72 overflow-y-auto pr-1 no-scrollbar">
+                {[...currentChild.rewards]
+                  .sort((a, b) => a.points - b.points)
+                  .map(r => {
+                    const canClaim = monthTotalPoints >= r.points;
+                    return (
+                      <div
+                        key={r.id}
+                        className={`p-3.5 rounded-2xl flex items-center gap-3 border transition ${
+                          canClaim ? "bg-emerald-50/70 border-emerald-200" : "bg-slate-50 border-slate-100"
+                        }`}
+                      >
+                        <span className="text-3xl shrink-0">{r.emoji}</span>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-black text-slate-800 truncate">{getLocal(r.name, lang)}</p>
+                          <p className="text-xs font-bold text-amber-700">
+                            {T.needs} {r.points} ⭐
+                          </p>
+                        </div>
+                        <span
+                          className={`text-xs font-black px-2.5 py-1 rounded-full ${
+                            canClaim ? "bg-emerald-500 text-white" : "bg-slate-200 text-slate-600"
+                          }`}
+                        >
+                          {canClaim ? T.achieved : `${Math.max(0, r.points - monthTotalPoints)} ${T.pointsUnit}`}
+                        </span>
+                        {mode === "parent" && (
+                          <button
+                            onClick={() =>
+                              updateCurrentChild(c => ({
+                                ...c,
+                                rewards: c.rewards.filter(x => x.id !== r.id)
+                              }))
+                            }
+                            className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg transition"
+                          >
+                            <Icons.Trash size={16} />
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+              </div>
+
+              {mode === "parent" && (
+                <div className="grid grid-cols-[1fr_90px_auto] gap-2 mt-4 pt-3 border-t border-slate-100">
+                  <input
+                    type="text"
+                    value={newRewardTitle}
+                    onChange={e => setNewRewardTitle(e.target.value)}
+                    placeholder={T.rewardName}
+                    className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs sm:text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-rose-300"
+                  />
+                  <input
+                    type="number"
+                    min="1"
+                    value={newRewardPoints}
+                    onChange={e => setNewRewardPoints(e.target.value)}
+                    className="p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-xs sm:text-sm font-bold text-center focus:outline-none focus:ring-2 focus:ring-amber-300"
+                  />
+                  <button
+                    onClick={() => {
+                      if (!newRewardTitle.trim()) return;
+                      updateCurrentChild(c => ({
+                        ...c,
+                        rewards: [
+                          ...c.rewards,
+                          {
+                            id: Date.now(),
+                            points: Math.max(1, Number(newRewardPoints) || 1),
+                            emoji: "🎁",
+                            name: { zh: newRewardTitle.trim(), en: newRewardTitle.trim() }
+                          }
+                        ]
+                      }));
+                      setNewRewardTitle("");
+                    }}
+                    className="px-4 py-2 bg-rose-500 hover:bg-rose-600 text-white rounded-xl text-xs sm:text-sm font-black transition"
+                  >
+                    {T.add}
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Daily Reminder Settings */}
+            <div className="bg-white rounded-3xl p-5 sm:p-6 border border-slate-100 shadow-sm flex flex-col justify-between">
+              <div>
+                <h3 className="text-base sm:text-lg font-black text-slate-800 flex items-center gap-2 mb-4">
+                  <Icons.Bell className="text-violet-500" />
+                  <span>{T.reminder}</span>
+                </h3>
+
+                <div className="flex flex-wrap items-center gap-3">
+                  <button
+                    disabled={mode !== "parent"}
+                    onClick={() => toggleReminder(!currentChild.reminder.enabled)}
+                    className={`px-4 py-2.5 rounded-2xl font-black text-xs sm:text-sm transition flex items-center gap-2 ${
+                      currentChild.reminder.enabled
+                        ? "bg-emerald-100 text-emerald-800 border border-emerald-300"
+                        : "bg-slate-100 text-slate-600 border border-slate-200"
+                    } ${mode !== "parent" ? "opacity-60 cursor-not-allowed" : ""}`}
+                  >
+                    <Icons.Bell size={16} />
+                    <span>{currentChild.reminder.enabled ? T.remEnabled : T.remDisabled}</span>
+                  </button>
+
+                  <input
+                    type="time"
+                    disabled={mode !== "parent"}
+                    value={currentChild.reminder.time}
+                    onChange={e =>
+                      updateCurrentChild(c => ({
+                        ...c,
+                        reminder: { ...c.reminder, time: e.target.value }
+                      }))
+                    }
+                    className={`p-2.5 bg-violet-50 border border-violet-200 rounded-xl font-black text-sm text-violet-900 focus:outline-none focus:ring-2 focus:ring-violet-400 ${
+                      mode !== "parent" ? "opacity-60 cursor-not-allowed" : ""
+                    }`}
+                  />
+                </div>
+
+                <p className="text-xs sm:text-sm text-slate-500 mt-4 leading-relaxed font-medium">
+                  {T.remNote}
+                </p>
+              </div>
+
+              {mode !== "parent" && (
+                <div className="mt-4 p-3 bg-amber-50 rounded-xl text-xs font-bold text-amber-800 flex items-center gap-2">
+                  <Icons.Lock size={15} />
+                  <span>{T.locked}</span>
+                </div>
+              )}
+            </div>
+          </section>
+
+          {}
+          {mode === "parent" && (
+            <>
+              {/* Target & Security PIN */}
+              <section className="grid md:grid-cols-3 gap-4 mt-6">
+                <div className="bg-white rounded-3xl p-5 border border-slate-100 shadow-sm">
+                  <h4 className="font-black text-slate-800 flex items-center gap-2 mb-3">
+                    <Icons.Trophy size={18} className="text-amber-500" />
+                    <span>{T.mainGoal}</span>
+                  </h4>
+                  <label className="text-xs font-bold text-slate-500">{T.rewardContent}</label>
+                  <input
+                    type="text"
+                    value={getLocal(currentChild.rewardText, lang)}
+                    onChange={e =>
+                      updateCurrentChild(c => ({
+                        ...c,
+                        rewardText: { ...makeBi(c.rewardText), [lang]: e.target.value }
+                      }))
+                    }
+                    className="w-full p-2.5 mt-1 bg-amber-50 border border-amber-200 rounded-xl text-xs sm:text-sm font-bold focus:outline-none focus:ring-2 focus:ring-amber-300"
+                  />
+                  <label className="text-xs font-bold text-slate-500 block mt-2">{T.target}</label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={currentChild.rewardGoal}
+                    onChange={e =>
+                      updateCurrentChild(c => ({
+                        ...c,
+                        rewardGoal: Math.max(1, Number(e.target.value) || 1)
+                      }))
+                    }
+                    className="w-full p-2.5 mt-1 bg-amber-50 border border-amber-200 rounded-xl text-xs sm:text-sm font-bold focus:outline-none focus:ring-2 focus:ring-amber-300"
+                  />
+                </div>
+
+                <div className="bg-white rounded-3xl p-5 border border-slate-100 shadow-sm">
+                  <h4 className="font-black text-slate-800 flex items-center gap-2 mb-3">
+                    <Icons.Shield size={18} className="text-sky-500" />
+                    <span>{T.pin}</span>
+                  </h4>
+                  <p className="text-xs text-slate-500 font-medium">{T.pinNote}</p>
+                  <input
+                    type="password"
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={pin}
+                    onChange={e => setPin(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                    className="w-full p-3 mt-3 bg-slate-50 border border-slate-200 rounded-xl text-center text-xl tracking-[0.4em] font-black focus:outline-none focus:ring-2 focus:ring-sky-300"
+                  />
+                </div>
+
+                <div className="bg-white rounded-3xl p-5 border border-slate-100 shadow-sm">
+                  <h4 className="font-black text-slate-800 flex items-center gap-2 mb-3">
+                    <span className="text-base">💌</span>
+                    <span>{T.message}</span>
+                  </h4>
+                  <textarea
+                    rows={4}
+                    value={getLocal(currentChild.parentMessage, lang)}
+                    onChange={e =>
+                      updateCurrentChild(c => ({
+                        ...c,
+                        parentMessage: { ...makeBi(c.parentMessage), [lang]: e.target.value }
+                      }))
+                    }
+                    className="w-full p-2.5 bg-violet-50/70 border border-violet-200 rounded-xl text-xs sm:text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-violet-300 resize-none"
+                  />
+                </div>
+              </section>
+
+              {/* Task Library Management */}
+              <section className="mt-6 bg-white rounded-3xl p-5 sm:p-6 border border-slate-100 shadow-sm">
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+                  <h3 className="font-black text-base sm:text-lg text-slate-800 flex items-center gap-2">
+                    <span>⚙️</span>
+                    <span>{currentChild.avatar} {currentChild.name} · {T.tasks}</span>
+                  </h3>
+                  <span className="text-xs text-slate-400 font-bold">{T.history}</span>
+                </div>
+
+                {/* Add Task Input Bar */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-[1fr_150px_90px_160px_auto] gap-2.5">
+                  <input
+                    type="text"
+                    value={newTaskName}
+                    onChange={e => setNewTaskName(e.target.value)}
+                    placeholder={T.newTask}
+                    className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs sm:text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-sky-300"
+                    onKeyDown={e => e.key === "Enter" && handleAddTask()}
+                  />
+
+                  <select
+                    value={newTaskCategory}
+                    onChange={e => setNewTaskCategory(e.target.value)}
+                    className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs sm:text-sm font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-sky-300"
+                  >
+                    {Object.keys(categories).map(k => (
+                      <option key={k} value={k}>
+                        {categories[k].emoji} {T[k]}
+                      </option>
+                    ))}
+                  </select>
+
+                  <input
+                    type="number"
+                    min="1"
+                    value={newTaskPoints}
+                    onChange={e => setNewTaskPoints(e.target.value)}
+                    className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs sm:text-sm font-black text-center text-amber-900 focus:outline-none focus:ring-2 focus:ring-amber-300"
+                    title="任务分值"
+                  />
+
+                  <select
+                    value={newTaskRepeat}
+                    onChange={e => setNewTaskRepeat(e.target.value)}
+                    className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs sm:text-sm font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-sky-300"
+                  >
+                    <option value="daily">{T.everyday}</option>
+                    <option value="weekdays">{T.weekdays}</option>
+                    <option value="weekends">{T.weekends}</option>
+                    <option value="custom">{T.selected}</option>
+                  </select>
+
+                  <button
+                    onClick={handleAddTask}
+                    className="px-5 py-3 bg-sky-500 hover:bg-sky-600 text-white rounded-xl font-black text-xs sm:text-sm flex items-center justify-center gap-1.5 transition shadow-sm"
+                  >
+                    <Icons.Plus size={18} />
+                    <span>{T.add}</span>
+                  </button>
+                </div>
+
+                {newTaskRepeat === "custom" && (
+                  <div className="flex flex-wrap items-center gap-2 mt-3 pt-2">
+                    <span className="text-xs font-bold text-slate-400">选择星期：</span>
+                    {[1, 2, 3, 4, 5, 6, 0].map((d, i) => (
+                      <button
+                        key={d}
+                        onClick={() =>
+                          setNewTaskDays(prev =>
+                            prev.includes(d) ? prev.filter(x => x !== d) : [...prev, d]
+                          )
+                        }
+                        className={`px-3 py-1.5 rounded-xl font-black text-xs transition ${
+                          newTaskDays.includes(d)
+                            ? "bg-sky-500 text-white shadow-xs"
+                            : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                        }`}
+                      >
+                        {weekLabels[i]}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {/* Task List */}
+                <div className="space-y-2 mt-5">
+                  {currentChild.tasks.map(t => {
+                    const catStyle = categories[t.category] || categories.learning;
+                    return (
+                      <div
+                        key={t.id}
+                        className={`flex items-center gap-3 p-3.5 rounded-2xl border ${catStyle.color} transition`}
+                      >
+                        <span className="text-2xl shrink-0">{t.emoji}</span>
+                        <div className="flex-1 min-w-0">
+                          <p className="font-black text-xs sm:text-sm truncate">{getLocal(t.name, lang)}</p>
+                          <div className="flex items-center gap-2 mt-0.5">
+                            <span className="text-[11px] font-bold text-amber-800">+{t.points} ⭐</span>
+                            <span className="text-[10px] bg-white/70 px-2 py-0.5 rounded-md font-bold text-slate-600">
+                              {repeatLabelMap[t.schedule.type] || T.everyday}
+                            </span>
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => setEditingTask({ ...t, name: { ...makeBi(t.name) }, schedule: { ...t.schedule } })}
+                          className="p-2 hover:bg-white/60 rounded-xl text-slate-600 transition"
+                          title={T.edit}
+                        >
+                          <Icons.Edit size={16} />
+                        </button>
+                        <button
+                          onClick={() =>
+                            updateCurrentChild(c => ({
+                              ...c,
+                              tasks: c.tasks.filter(x => x.id !== t.id)
+                            }))
+                          }
+                          className="p-2 hover:bg-rose-100 rounded-xl text-rose-600 transition"
+                          title="删除"
+                        >
+                          <Icons.Trash size={16} />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+            </>
+          )}
+
+          {}
+          {celebrateInfo && (
+            <div className="fixed inset-0 z-50 pointer-events-none flex items-center justify-center p-4">
+              <div className="bg-white/95 backdrop-blur-md shadow-2xl border-4 border-amber-300 rounded-3xl p-8 text-center max-w-sm w-full animate-pop">
+                <div className="text-7xl animate-float leading-none mb-2">{celebrateInfo.emoji}</div>
+                <h3 className="text-3xl font-black text-orange-600 mt-2">
+                  {T.great} +{celebrateInfo.points} ⭐
+                </h3>
+                <p className="font-extrabold text-slate-700 text-base mt-1">
+                  {celebrateInfo.name} {T.done}
+                </p>
+                <div className="text-2xl mt-4">🎉 🌟 🎊 🌟 🎉</div>
+              </div>
+            </div>
+          )}
+
+          {}
+          {editingTask && (
+            <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
+              <div className="w-full max-w-md bg-white rounded-3xl shadow-2xl p-6 border border-slate-100 animate-pop">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="font-black text-lg text-slate-800 flex items-center gap-2">
+                    <Icons.Edit size={20} />
+                    <span>{T.edit}</span>
+                  </h3>
+                  <button onClick={() => setEditingTask(null)} className="text-slate-400 hover:text-slate-700">
+                    <Icons.Close size={20} />
+                  </button>
+                </div>
+
+                <div className="space-y-3">
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={editingTask.emoji}
+                      onChange={e => setEditingTask({ ...editingTask, emoji: e.target.value })}
+                      className="w-16 p-3 bg-slate-50 border rounded-xl text-center text-xl font-bold"
+                    />
+                    <input
+                      type="text"
+                      value={getLocal(editingTask.name, lang)}
+                      onChange={e =>
+                        setEditingTask({
+                          ...editingTask,
+                          name: { ...makeBi(editingTask.name), [lang]: e.target.value }
+                        })
+                      }
+                      className="flex-1 p-3 bg-slate-50 border rounded-xl font-bold text-sm"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <select
+                      value={editingTask.category}
+                      onChange={e => setEditingTask({ ...editingTask, category: e.target.value })}
+                      className="p-3 bg-slate-50 border rounded-xl font-bold text-xs sm:text-sm"
+                    >
+                      {Object.keys(categories).map(k => (
+                        <option key={k} value={k}>
+                          {categories[k].emoji} {T[k]}
+                        </option>
+                      ))}
+                    </select>
+
+                    <input
+                      type="number"
+                      min="1"
+                      value={editingTask.points}
+                      onChange={e =>
+                        setEditingTask({ ...editingTask, points: Math.max(1, Number(e.target.value) || 1) })
+                      }
+                      className="p-3 bg-amber-50 border border-amber-200 rounded-xl font-black text-center text-amber-900"
+                    />
+                  </div>
+
+                  <select
+                    value={editingTask.schedule.type}
+                    onChange={e =>
+                      setEditingTask({
+                        ...editingTask,
+                        schedule: { ...editingTask.schedule, type: e.target.value }
+                      })
+                    }
+                    className="w-full p-3 bg-slate-50 border rounded-xl font-bold text-sm"
+                  >
+                    <option value="daily">{T.everyday}</option>
+                    <option value="weekdays">{T.weekdays}</option>
+                    <option value="weekends">{T.weekends}</option>
+                    <option value="custom">{T.selected}</option>
+                  </select>
+
+                  {editingTask.schedule.type === "custom" && (
+                    <div className="flex flex-wrap gap-1.5 pt-1">
+                      {[1, 2, 3, 4, 5, 6, 0].map((d, i) => {
+                        const days = editingTask.schedule.days || [];
+                        const has = days.includes(d);
+                        return (
+                          <button
+                            key={d}
+                            onClick={() =>
+                              setEditingTask({
+                                ...editingTask,
+                                schedule: {
+                                  ...editingTask.schedule,
+                                  days: has ? days.filter(x => x !== d) : [...days, d]
+                                }
+                              })
+                            }
+                            className={`px-3 py-1.5 rounded-xl font-black text-xs ${
+                              has ? "bg-sky-500 text-white" : "bg-slate-100 text-slate-600"
+                            }`}
+                          >
+                            {weekLabels[i]}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  <button
+                    onClick={handleSaveEdit}
+                    className="w-full mt-2 py-3 bg-sky-500 hover:bg-sky-600 text-white rounded-xl font-black text-sm transition"
+                  >
+                    {T.save}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {}
+          {pinModalOpen && (
+            <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
+              <div className="w-full max-w-sm bg-white rounded-3xl shadow-2xl p-6 border border-slate-100 text-center animate-pop">
+                <div className="w-12 h-12 rounded-2xl bg-violet-100 text-violet-600 flex items-center justify-center mx-auto mb-3">
+                  <Icons.Lock size={24} />
+                </div>
+                <h3 className="text-xl font-black text-slate-800">{T.unlockTitle}</h3>
+                <p className="text-xs font-semibold text-slate-500 mt-1">{T.enterPin}</p>
+
+                <input
+                  type="password"
+                  inputMode="numeric"
+                  maxLength={6}
+                  autoFocus
+                  value={pinInput}
+                  onChange={e => setPinInput(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                  onKeyDown={e => e.key === "Enter" && verifyUnlock()}
+                  className="w-full p-3.5 mt-4 bg-slate-50 border border-slate-200 rounded-2xl text-center text-3xl font-black tracking-[0.5em] focus:outline-none focus:ring-2 focus:ring-violet-400"
+                />
+
+                {pinError && <p className="text-rose-500 text-xs font-bold mt-2">{pinError}</p>}
+
+                <div className="grid grid-cols-2 gap-2 mt-5">
+                  <button
+                    onClick={() => {
+                      setPinModalOpen(false);
+                      setPinInput("");
+                      setPinError("");
+                    }}
+                    className="p-3 bg-slate-100 hover:bg-slate-200 rounded-xl font-black text-xs text-slate-600 transition"
+                  >
+                    {T.cancel}
+                  </button>
+                  <button
+                    onClick={verifyUnlock}
+                    className="p-3 bg-violet-600 hover:bg-violet-700 text-white rounded-xl font-black text-xs transition shadow-sm"
+                  >
+                    {T.unlock}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Child Profile Management Modal (Unobstructed & Touch Friendly) */}
+          {showChildMenu && (
+            <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
+              <div className="w-full max-w-md bg-white rounded-3xl shadow-2xl p-5 sm:p-6 border border-slate-100 animate-pop max-h-[90vh] overflow-y-auto no-scrollbar">
+                <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                  <div className="flex items-center gap-2">
+                    <div className="w-9 h-9 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center font-bold">
+                      <Icons.Users size={20} />
+                    </div>
+                    <div>
+                      <h3 className="text-base sm:text-lg font-black text-slate-800">{T.manageChildren}</h3>
+                      <p className="text-[11px] text-slate-400 font-bold">{T.choose}</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setShowChildMenu(false)}
+                    className="text-slate-400 hover:text-slate-700 p-1.5 rounded-xl hover:bg-slate-100 transition"
+                  >
+                    <Icons.Close size={20} />
+                  </button>
+                </div>
+
+                {/* Child List */}
+                <div className="space-y-2 mt-4">
+                  {children.map(c => {
+                    const isActive = c.id === currentChild.id;
+                    return (
+                      <div
+                        key={c.id}
+                        className={`w-full p-3 rounded-2xl flex items-center justify-between border transition ${
+                          isActive
+                            ? "bg-amber-50/80 border-amber-300 ring-2 ring-amber-200"
+                            : "bg-slate-50 border-slate-100 hover:border-slate-200"
+                        }`}
+                      >
+                        <button
+                          onClick={() => {
+                            setActiveId(c.id);
+                            setShowChildMenu(false);
+                          }}
+                          className="flex items-center gap-3 flex-1 min-w-0 text-left"
+                        >
+                          <span className="text-3xl shrink-0 leading-none">{c.avatar}</span>
+                          <div className="flex-1 min-w-0">
+                            <p className="font-black text-sm sm:text-base text-slate-800 truncate">{c.name}</p>
+                            <span className="text-[11px] font-bold text-amber-700">
+                              {isActive ? "✨ 当前正在打卡" : "点击切换至此宝贝"}
+                            </span>
+                          </div>
+                        </button>
+
+                        <div className="flex items-center gap-1.5 shrink-0 ml-2">
+                          {isActive && (
+                            <span className="px-2 py-0.5 bg-amber-400 text-amber-950 font-black text-[10px] rounded-full">
+                              当前
+                            </span>
+                          )}
+                          {mode === "parent" && children.length > 1 && (
+                            <button
+                              onClick={() => handleDeleteChild(c.id, c.name)}
+                              className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-xl transition"
+                              title="删除档案"
+                            >
+                              <Icons.Trash size={16} />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Add Child Profile Section (Parent Only) */}
+                {mode === "parent" ? (
+                  <div className="mt-5 pt-4 border-t border-slate-100 bg-gradient-to-br from-amber-50/60 to-orange-50/40 p-4 rounded-2xl border border-amber-200/50">
+                    <h4 className="text-xs font-black text-slate-800 flex items-center gap-1.5 mb-2.5">
+                      <span>➕</span>
+                      <span>{T.addChildProfile}</span>
+                    </h4>
+
+                    {/* Avatar Picker */}
+                    <div className="mb-3">
+                      <p className="text-[11px] font-bold text-slate-500 mb-1.5">{T.chooseAvatar}：</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {["🧒", "👧", "👦", "🐻", "🦊", "🐰", "🦁", "🐼", "🦄", "🚀"].map(emoji => (
+                          <button
+                            key={emoji}
+                            type="button"
+                            onClick={() => setSelectedAvatar(emoji)}
+                            className={`w-9 h-9 rounded-xl text-lg flex items-center justify-center transition border ${
+                              selectedAvatar === emoji
+                                ? "bg-amber-400 border-amber-500 scale-110 shadow-xs"
+                                : "bg-white border-slate-200 hover:bg-slate-100"
+                            }`}
+                          >
+                            {emoji}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Name Input & Add Button */}
+                    <div className="space-y-2">
+                      <div className="flex gap-2">
+                        <span className="w-11 h-11 bg-white border border-amber-200 rounded-xl flex items-center justify-center text-2xl shrink-0 shadow-xs">
+                          {selectedAvatar}
+                        </span>
+                        <input
+                          type="text"
+                          value={newChildName}
+                          onChange={e => setNewChildName(e.target.value)}
+                          placeholder="输入宝贝名字（例如：小宝 / 彤彤）"
+                          className="flex-1 min-w-0 px-3 py-2.5 bg-white border border-slate-200 rounded-xl text-xs sm:text-sm font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-300"
+                          onKeyDown={e => e.key === "Enter" && handleAddChild()}
+                        />
+                      </div>
+
+                      <button
+                        onClick={handleAddChild}
+                        className="w-full py-3 bg-amber-500 hover:bg-amber-600 text-white rounded-xl font-black text-xs sm:text-sm transition flex items-center justify-center gap-2 shadow-xs"
+                      >
+                        <Icons.Plus size={18} />
+                        <span>{T.confirmAdd}</span>
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="mt-4 p-3 bg-slate-50 rounded-xl text-center text-xs font-bold text-slate-500">
+                    🔒 如需添加或删除宝贝档案，请先在右上角切换到家长模式
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {aiModalOpen && (
+            <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
+              <div className="w-full max-w-2xl bg-white rounded-3xl shadow-2xl p-5 sm:p-7 border border-slate-100 animate-pop max-h-[92vh] overflow-y-auto no-scrollbar flex flex-col justify-between">
+                <div>
+                  {/* Modal Header */}
+                  <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-violet-600 to-indigo-600 text-white flex items-center justify-center shadow-sm shadow-violet-200">
+                        <Icons.Sparkles size={22} className="text-amber-300" />
+                      </div>
+                      <div>
+                        <h3 className="text-lg sm:text-xl font-black text-slate-800 flex items-center gap-2">
+                          <span>{T.aiAssistant}</span>
+                          <span className="text-xs px-2 py-0.5 rounded-full bg-violet-100 text-violet-700 font-extrabold">Gemini 3 Flash</span>
+                        </h3>
+                        <p className="text-xs text-slate-500 font-bold">{currentChild.avatar} {currentChild.name} 专属成长建议与灵感</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setAiModalOpen(false)}
+                      className="text-slate-400 hover:text-slate-700 p-1.5 rounded-xl hover:bg-slate-100 transition"
+                    >
+                      <Icons.Close size={20} />
+                    </button>
+                  </div>
+
+                  {/* Feature Tab Navigation */}
+                  <div className="flex bg-slate-100 p-1 rounded-2xl mt-4 gap-1">
+                    {[
+                      ["habits", T.aiTabHabits, "🌱"],
+                      ["story", T.aiTabStory, "📖"],
+                      ["rewards", T.aiTabRewards, "🎁"]
+                    ].map(([tabKey, label, iconEmoji]) => (
+                      <button
+                        key={tabKey}
+                        onClick={() => {
+                          setAiActiveTab(tabKey);
+                          if (tabKey === "story" && !aiStoryResult) handleGenerateStoryAI();
+                          if (tabKey === "rewards" && !aiGeneratedRewards.length) handleGenerateRewardsAI();
+                        }}
+                        className={`flex-1 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-black transition flex items-center justify-center gap-1.5 ${
+                          aiActiveTab === tabKey
+                            ? "bg-white text-violet-900 shadow-sm"
+                            : "text-slate-600 hover:text-slate-900"
+                        }`}
+                      >
+                        <span>{iconEmoji}</span>
+                        <span>{label}</span>
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Tab 1: AI Habit Generator */}
+                  {aiActiveTab === "habits" && (
+                    <div className="mt-4 space-y-4">
+                      <div className="p-4 bg-violet-50/70 border border-violet-100 rounded-2xl grid sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="text-xs font-black text-violet-900 block mb-1">{T.aiAgeGroup}</label>
+                          <select
+                            value={aiAgeGroup}
+                            onChange={e => setAiAgeGroup(e.target.value)}
+                            className="w-full p-2.5 bg-white border border-violet-200 rounded-xl text-xs sm:text-sm font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-violet-300"
+                          >
+                            <option value="3-4岁 (幼小托育)">3-4岁 (小班幼托)</option>
+                            <option value="5-6岁 (幼小衔接)">5-6岁 (大班/幼小衔接)</option>
+                            <option value="7-9岁 (小学低年级)">7-9岁 (小学低年级)</option>
+                            <option value="10-12岁 (小学高年级)">10-12岁 (小学高年级)</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="text-xs font-black text-violet-900 block mb-1">{T.aiFocus}</label>
+                          <select
+                            value={aiFocusArea}
+                            onChange={e => setAiFocusArea(e.target.value)}
+                            className="w-full p-2.5 bg-white border border-violet-200 rounded-xl text-xs sm:text-sm font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-violet-300"
+                          >
+                            <option value="自主自理与收拾整理">自主自理与收拾整理</option>
+                            <option value="专注力、阅读与作业习惯">专注力、阅读与作业习惯</option>
+                            <option value="户外体育、运动健康与视力保护">户外运动与健康作息</option>
+                            <option value="礼貌沟通、情绪表达与主动感恩">情绪表达、社交与主动感恩</option>
+                            <option value="创造力、乐高搭建与绘画手工">艺术创意与动手实践</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      <div className="flex justify-between items-center">
+                        <p className="text-xs font-bold text-slate-500">点击任意卡片即可一键加入任务库：</p>
+                        <button
+                          disabled={aiLoading}
+                          onClick={handleGenerateHabitsAI}
+                          className="px-4 py-2 bg-violet-600 hover:bg-violet-700 disabled:opacity-50 text-white rounded-xl text-xs font-black transition flex items-center gap-1.5 shadow-sm"
+                        >
+                          <Icons.Sparkles size={15} />
+                          <span>{aiLoading ? T.aiApplying : T.aiGenTasksBtn}</span>
+                        </button>
+                      </div>
+
+                      {/* Generated Habit List */}
+                      {aiLoading ? (
+                        <div className="py-12 text-center text-violet-700">
+                          <div className="inline-block animate-spin text-3xl mb-2">✨</div>
+                          <p className="font-black text-sm">{T.aiApplying}</p>
+                        </div>
+                      ) : (
+                        <div className="grid sm:grid-cols-2 gap-2.5">
+                          {aiGeneratedTasks.map((t, idx) => {
+                            const catStyle = categories[t.category] || categories.learning;
+                            return (
+                              <div
+                                key={idx}
+                                className={`p-3 rounded-2xl border flex items-center justify-between gap-2.5 transition hover:shadow-sm ${catStyle.color}`}
+                              >
+                                <span className="text-2xl shrink-0">{t.emoji}</span>
+                                <div className="flex-1 min-w-0">
+                                  <p className="text-xs sm:text-sm font-black truncate">
+                                    {lang === "zh" ? t.nameZh : t.nameEn}
+                                  </p>
+                                  <div className="flex items-center gap-2 mt-0.5">
+                                    <span className="text-[10px] font-bold text-amber-800">+{t.points} ⭐</span>
+                                    <span className="text-[9px] bg-white/80 px-1.5 py-0.5 rounded font-extrabold">
+                                      {t.scheduleType === "daily" ? T.everyday : t.scheduleType === "weekdays" ? T.weekdays : T.weekends}
+                                    </span>
+                                  </div>
+                                </div>
+                                <button
+                                  onClick={() => addAITaskToCalendar(t)}
+                                  className="px-2.5 py-1.5 bg-white text-slate-800 hover:bg-emerald-50 hover:text-emerald-700 rounded-xl text-xs font-black shadow-xs border border-slate-200 transition shrink-0"
+                                >
+                                  + 添加
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Tab 2: AI Bedtime Story & Praise Letter */}
+                  {aiActiveTab === "story" && (
+                    <div className="mt-4 space-y-4">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-bold text-slate-500">
+                          基于今日打卡记录，Gemini 为孩子生成的专属勇气小故事：
+                        </span>
+                        <button
+                          disabled={aiLoading}
+                          onClick={() => handleGenerateStoryAI(focusDate)}
+                          className="px-4 py-2 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 disabled:opacity-50 text-white rounded-xl text-xs font-black transition flex items-center gap-1.5 shadow-sm"
+                        >
+                          <Icons.Sparkles size={15} />
+                          <span>{aiLoading ? T.aiApplying : "换一篇故事"}</span>
+                        </button>
+                      </div>
+
+                      {aiLoading ? (
+                        <div className="py-16 text-center text-amber-700">
+                          <div className="inline-block animate-bounce text-4xl mb-2">📖</div>
+                          <p className="font-black text-sm">{T.aiApplying}</p>
+                        </div>
+                      ) : (
+                        <div className="p-5 sm:p-6 bg-gradient-to-br from-amber-50/80 via-orange-50/40 to-rose-50/80 border border-amber-200 rounded-3xl shadow-inner">
+                          <div className="flex items-center gap-2 mb-3">
+                            <span className="text-2xl">🌟</span>
+                            <h4 className="font-black text-slate-800 text-sm sm:text-base">
+                              给 {currentChild.name} 的今日小勇士故事
+                            </h4>
+                          </div>
+                          <div className="text-slate-700 text-xs sm:text-sm leading-relaxed font-semibold whitespace-pre-line">
+                            {aiStoryResult || "点击上方按钮生成今日专属鼓励故事..."}
+                          </div>
+                          <div className="mt-4 pt-3 border-t border-amber-200/60 flex items-center justify-between text-xs text-amber-800 font-bold">
+                            <span>❤️ 爸爸妈妈爱你，为你感到骄傲！</span>
+                            <button
+                              onClick={() => {
+                                const textArea = document.createElement("textarea");
+                                textArea.value = aiStoryResult;
+                                document.body.appendChild(textArea);
+                                textArea.select();
+                                document.execCommand("copy");
+                                document.body.removeChild(textArea);
+                                showToast(lang === "zh" ? "✅ 故事已复制到剪贴板！" : "✅ Story copied to clipboard!");
+                              }}
+                              className="px-3 py-1 bg-white rounded-lg border border-amber-300 hover:bg-amber-100 transition shadow-xs"
+                            >
+                              复制故事文本
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Tab 3: AI Family Reward Ideas */}
+                  {aiActiveTab === "rewards" && (
+                    <div className="mt-4 space-y-4">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-bold text-slate-500">
+                          推荐更具情感连接的低成本、高互动家庭奖励：
+                        </span>
+                        <button
+                          disabled={aiLoading}
+                          onClick={handleGenerateRewardsAI}
+                          className="px-4 py-2 bg-rose-500 hover:bg-rose-600 disabled:opacity-50 text-white rounded-xl text-xs font-black transition flex items-center gap-1.5 shadow-sm"
+                        >
+                          <Icons.Sparkles size={15} />
+                          <span>{aiLoading ? T.aiApplying : T.aiGenRewardsBtn}</span>
+                        </button>
+                      </div>
+
+                      {aiLoading ? (
+                        <div className="py-12 text-center text-rose-700">
+                          <div className="inline-block animate-spin text-3xl mb-2">🎁</div>
+                          <p className="font-black text-sm">{T.aiApplying}</p>
+                        </div>
+                      ) : (
+                        <div className="space-y-2.5">
+                          {aiGeneratedRewards.map((r, idx) => (
+                            <div
+                              key={idx}
+                              className="p-3.5 bg-rose-50/70 border border-rose-100 rounded-2xl flex items-center justify-between gap-3"
+                            >
+                              <span className="text-3xl shrink-0">{r.emoji}</span>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-xs sm:text-sm font-black text-slate-800 truncate">
+                                  {lang === "zh" ? r.nameZh : r.nameEn}
+                                </p>
+                                <p className="text-xs font-bold text-amber-700">{T.needs} {r.points} ⭐</p>
+                              </div>
+                              <button
+                                onClick={() => addAIRewardToCalendar(r)}
+                                className="px-3 py-1.5 bg-rose-500 hover:bg-rose-600 text-white rounded-xl text-xs font-black shadow-xs transition"
+                              >
+                                加入兑奖池
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* Footer Modal Action */}
+                <div className="mt-6 pt-4 border-t border-slate-100 flex justify-end">
+                  <button
+                    onClick={() => setAiModalOpen(false)}
+                    className="px-5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-black text-xs transition"
+                  >
+                    {T.aiClose}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {}
+          {showCloudModal && (
+            <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
+              <div className="w-full max-w-xl bg-white rounded-3xl shadow-2xl p-6 border border-slate-100 animate-pop max-h-[90vh] overflow-y-auto no-scrollbar">
+                <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-10 h-10 rounded-xl bg-sky-100 text-sky-600 flex items-center justify-center">
+                      <Icons.Smartphone size={22} />
+                    </div>
+                    <div>
+                      <h3 className="text-lg font-black text-slate-800">{T.cloudSync}</h3>
+                      <p className="text-xs text-slate-500 font-bold">{T.cloudLive}</p>
+                    </div>
+                  </div>
+                  <button onClick={() => setShowCloudModal(false)} className="text-slate-400 hover:text-slate-700 p-1">
+                    <Icons.Close size={20} />
+                  </button>
+                </div>
+
+                <div className="space-y-4 mt-4">
+                  {/* Family Sync ID Section */}
+                  <div className="p-4 bg-sky-50/70 border border-sky-200 rounded-2xl">
+                    <label className="text-xs font-black text-sky-900 block mb-1">
+                      🔑 {T.familyIdLabel}
+                    </label>
+                    <p className="text-xs text-slate-600 mb-3 leading-relaxed">
+                      {T.familyIdDesc}
+                    </p>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={inputFamilyId}
+                        onChange={e => setInputFamilyId(e.target.value)}
+                        className="flex-1 px-3 py-2.5 bg-white border border-sky-200 rounded-xl text-xs sm:text-sm font-black text-sky-900 focus:outline-none focus:ring-2 focus:ring-sky-300"
+                        placeholder="例如: chen-family-2026"
+                      />
+                      <button
+                        onClick={() => {
+                          const cleanId = inputFamilyId.trim() || "my-family-default";
+                          setFamilyId(cleanId);
+                          showToast(lang === "zh" ? `✅ 已切换至家庭口令：${cleanId}` : `✅ Connected to family code: ${cleanId}`);
+                        }}
+                        className="px-4 py-2.5 bg-sky-600 hover:bg-sky-700 text-white rounded-xl text-xs font-black transition whitespace-nowrap"
+                      >
+                        {T.switchFamily}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* One-Click Share Link for Mobile and iPad */}
+                  <div className="p-4 bg-amber-50/70 border border-amber-200 rounded-2xl">
+                    <label className="text-xs font-black text-amber-900 block mb-1">
+                      📱 手机 / 平板专属访问链接
+                    </label>
+                    <p className="text-xs text-slate-600 mb-3">
+                      复制此链接发送到微信、QQ、浏览器或生成桌面图标，打开即可同步家庭数据！
+                    </p>
+                    <button
+                      onClick={copyMobileShareLink}
+                      className="w-full py-3 bg-amber-500 hover:bg-amber-600 text-white rounded-xl font-black text-xs sm:text-sm flex items-center justify-center gap-2 shadow-xs transition"
+                    >
+                      <Icons.Copy size={16} />
+                      <span>{T.copyLink}</span>
+                    </button>
+                  </div>
+
+                  {/* Free Cloud Deployment Guide */}
+                  <div className="p-4 bg-slate-50 border border-slate-200 rounded-2xl space-y-2.5">
+                    <h4 className="text-xs font-black text-slate-800 flex items-center gap-1.5">
+                      <span>🚀</span>
+                      <span>{T.cloudHelpTitle}</span>
+                    </h4>
+                    <div className="text-xs text-slate-600 space-y-2 leading-relaxed">
+                      <p className="font-semibold text-slate-700">
+                        您可以把这个单独的 HTML 文件托管在任何免费静态网站平台，即可拥有专属网址：
+                      </p>
+                      <ol className="list-decimal list-inside space-y-1.5 pl-1">
+                        <li><b>Vercel / Netlify（最推荐）：</b> 直接将本 HTML 文件拖入 Netlify Drop 或部署在 Vercel，10秒内生成免费永久公网 HTTPS 域名。</li>
+                        <li><b>GitHub Pages：</b> 创建免费仓库，上传重命名为 <code className="bg-slate-200 px-1 py-0.5 rounded text-slate-800">index.html</code>，开启 Pages 即可手机访问。</li>
+                        <li><b>添加到手机桌面（PWA体验）：</b> 在手机 Safari 或 Chrome 打开网址后，点击“分享/菜单” ➔ “添加到主屏幕”，即可像原生 App 一样全屏使用。</li>
+                      </ol>
+                    </div>
+                  </div>
+
+                  {/* Client Identifier (Required for multi-user apps) */}
+                  <div className="pt-2 flex items-center justify-between text-[11px] text-slate-400">
+                    <span>{T.cloudUserId}:</span>
+                    <span className="font-mono font-bold text-slate-600 bg-slate-100 px-2 py-0.5 rounded">
+                      {cloudUserId || "client-local-ready"}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="mt-5 text-right">
+                  <button
+                    onClick={() => setShowCloudModal(false)}
+                    className="px-5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-black text-xs transition"
+                  >
+                    {T.cancel}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    const container = document.getElementById("root");
+    const root = ReactDOM.createRoot(container);
+    root.render(<App />);
+  </script>
+</body>
+</html>
